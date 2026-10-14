@@ -52,7 +52,6 @@ class Dent {
   held = true;
   age = 0;
   releasedAt = 0;
-  rate = 0; // 깊이 변화 속도 (소리용)
 
   constructor(public pointerId: number, local: THREE.Vector3, normal: THREE.Vector3, public pan: number) {
     this.center = local.clone();
@@ -64,7 +63,6 @@ class Dent {
 
   update(dt: number): boolean {
     this.age += dt;
-    const before = this.depth;
     if (this.held) {
       this.center.lerp(this.target, ease(30, dt));
       this.normal.lerp(this.targetNormal, ease(20, dt)).normalize();
@@ -91,7 +89,6 @@ class Dent {
         this.radius += (TUNING.radius * 1.35 - this.radius) * ease(2, dt);
       }
     }
-    this.rate = Math.abs(this.depth - before) / Math.max(dt, 1e-4) / (TUNING.depth * 8);
     return this.held || this.depth > TUNING.depth * 0.01;
   }
 
@@ -532,7 +529,6 @@ export class SoapEngine {
     for (let i = this.dents.length - 1; i >= 0; i--) {
       const d = this.dents[i];
       if (!d.update(dt)) this.dents.splice(i, 1);
-      else this.audio.settle(d.held ? 0 : d.rate, dt, d.pan);
     }
     this.syncDents();
     if (this.dents.length) active = true;
