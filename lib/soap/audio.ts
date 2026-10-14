@@ -26,8 +26,13 @@ type ClipInfo = {
 };
 type Clip = ClipInfo & { buffer: AudioBuffer };
 
-/** 알갱이 종류: 누를 때 / 누른 채 문지를 때 / 다시 부풀 때 */
-export type GrainKind = 'press' | 'move' | 'release';
+/** 알갱이 종류: 누를 때 / 누른 채 문지를 때 */
+export type GrainKind = 'press' | 'move';
+
+/** 놓은 뒤 다시 부풀며 나는 '샤아아악' 한 줄기 */
+type Hiss = { src: AudioBufferSourceNode; band: BiquadFilterNode; level: GainNode; nodes: AudioNode[] };
+const MAX_HISS = 3;
+const HISS_PEAK = 0.55; // 가장 빨리 부풀 때 음량 (크런치보다 한참 작게)
 
 const MAX_GRAINS = 28; // 동시에 울리는 알갱이 최대 개수 (휴대폰 부담 제한)
 const DEFAULT_GIVE = 0.04; // 비누가 '바삭' 꺼지는 시점(초)
@@ -101,6 +106,7 @@ export class CrunchAudio {
   private clips: Clip[] = [];
   private group: string | null = null; // null = 전체에서 고름
   private activeGrains = 0;
+  private hisses = new Map<number, Hiss>();
   private lastGrain = '';
   private preloading = false;
 
@@ -307,22 +313,22 @@ export class CrunchAudio {
     const clips = (pool.length ? pool : this.clips).filter((c) => c.grains.length);
     if (!clips.length) return;
 
-    // 알갱이 고르기: 누를 땐 센 것 위주, 놓을 땐 약한 것 위주. 바로 전 알갱이는 피함.
-    const tries = kind === 'press' ? 3 : kind === 'release' ? 2 : 1;
+    // 알갱이 고르기: 누를 땐 센 것 위주. 바로 전 알갱이는 피함.
+    const tries = kind === 'press' ? 3 : 1;
     let best: { clip: Clip; g: [number, number] } | null = null;
     for (let i = 0; i < tries + 2 && (i < tries || !best); i++) {
       const clip = pick(clips);
       const g = pick(clip.grains);
       if (`${clip.id}@${g[0]}` === this.lastGrain && clips.length + clip.grains.length > 2) continue;
       if (!best) best = { clip, g };
-      else if (kind === 'press' ? g[1] > best.g[1] : kind === 'release' ? g[1] < best.g[1] : false) best = { clip, g };
+      else if (kind === 'press' && g[1] > best.g[1]) best = { clip, g };
     }
     if (!best) return;
     const { clip, g } = best;
     this.lastGrain = `${clip.id}@${g[0]}`;
 
     const ctx = this.ctx!;
-    const d = dur ?? (kind === 'press' ? rand(0.035, 0.06) : kind === 'move' ? rand(0.022, 0.04) : rand(0.018, 0.03));
+    const d = dur ?? (kind === 'press' ? rand(0.035, 0.06) : rand(0.022, 0.04));
     // 알갱이마다 세기 차이는 남기되 절반으로 줄여 고르게 (-16dBFS 기준)
     const level = clip.gain * Math.pow(10, ((-16 - g[1]) * 0.5) / 20);
     const peak = Math.min(1.2, level * clamp01(loud));
@@ -465,21 +471,79 @@ export class CrunchAudio {
     }
   }
 
-  /** 손을 뗄 때 공기가 빨려 들어가는 '스윽' */
-  release(depth: number) {
-    if (!this.ready || this.usingSamples) return;
-    const k = clamp01(depth);
-    if (k < 0.05) return;
-    const now = this.ctx!.currentTime;
-    this.thump(now + 0.01, 0.05 * k, 220, 700, 0.3);
-    // 다시 부풀면서 아주 가끔 '사각' — 프레임과 무관하게 미리 정해 둠 (폰 성능과 상관없이 같은 소리)
-    const n = Math.round(rand(3, 5) * k);
-    for (let i = 0; i < n; i++) {
-      this.play(pick(this.crackles), now + 0.2 + 1.0 * Math.pow(Math.random(), 1.4), rand(0.02, 0.04) * k, rand(-0.5, 0.5), rand(0.9, 1.1));
+  /**
+   * 놓은 뒤 비누가 다시 부풀 때 '샤아아악' — 공기가 거품 속으로 스며드는 소리.
+   * 녹음에는 이런 이어지는 소리가 없어서 부드러운 핑크 노이즈로 만든다.
+   * 크기와 밝기는 엔진이 매 프레임 hissLevel()로 부푸는 속도에 맞춰 바꾼다.
+   */
+  hissStart(id: number, pan = 0) {
+    if (!this.ready || !this.noise || this.hisses.has(id)) return;
+    if (this.hisses.size >= MAX_HISS) this.hissStop(this.hisses.keys().next().value!);
+    const ctx = this.ctx!;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.loop = true;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 700;
+    hp.Q.value = 0.6;
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 1800;
+    band.Q.value = 0.7;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 4800; // 날카로운 '쓰' 성분은 걷어냄
+    lp.Q.value = 0.5;
+    const level = ctx.createGain();
+    level.gain.value = 0;
+    // 거품 속 기포처럼 살짝 고르지 않게 (느린 흔들림 두 개)
+    const tex = ctx.createGain();
+    tex.gain.value = 1;
+    const lfos: OscillatorNode[] = [];
+    for (const [f, depth] of [[rand(7, 11), 0.18], [rand(17, 27), 0.12]] as const) {
+      const o = ctx.createOscillator();
+      o.frequency.value = f;
+      const dg = ctx.createGain();
+      dg.gain.value = depth;
+      o.connect(dg).connect(tex.gain);
+      o.start();
+      lfos.push(o);
     }
+    const p = ctx.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, pan * 0.5));
+    src.connect(hp).connect(band).connect(lp).connect(level).connect(tex).connect(p).connect(this.out!);
+    src.start(0, rand(0, 1.8));
+    this.hisses.set(id, { src, band, level, nodes: [hp, lp, tex, p, ...lfos] });
+  }
+
+  /** level 0~1: 지금 부푸는 속도 */
+  hissLevel(id: number, level: number) {
+    const h = this.hisses.get(id);
+    if (!h || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    const l = clamp01(level);
+    h.level.gain.setTargetAtTime(HISS_PEAK * Math.pow(l, 1.3), now, 0.03);
+    // 빨리 부풀수록 살짝 밝게, 잦아들수록 낮게
+    h.band.frequency.setTargetAtTime(1100 + 1400 * l, now, 0.05);
+  }
+
+  hissStop(id: number) {
+    const h = this.hisses.get(id);
+    if (!h || !this.ctx) return;
+    this.hisses.delete(id);
+    const now = this.ctx.currentTime;
+    h.level.gain.setTargetAtTime(0, now, 0.04);
+    h.src.stop(now + 0.25);
+    for (const n of h.nodes) if (n instanceof OscillatorNode) n.stop(now + 0.25);
+    h.src.onended = () => {
+      h.src.disconnect();
+      for (const n of h.nodes) n.disconnect();
+    };
   }
 
   dispose() {
+    for (const id of [...this.hisses.keys()]) this.hissStop(id);
     for (const type of ['pointerup', 'touchend', 'click', 'keydown'] as const) {
       window.removeEventListener(type, this.onGesture, true);
     }

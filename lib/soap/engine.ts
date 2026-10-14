@@ -49,6 +49,8 @@ export type EngineEvents = {
 
 const ease = (rate: number, dt: number) => 1 - Math.exp(-rate * dt);
 
+let dentSeq = 0;
+
 class Dent {
   center: THREE.Vector3;
   target: THREE.Vector3;
@@ -64,6 +66,8 @@ class Dent {
   crunchAt = TUNING.crunchAt;
   // 소리: 지난 프레임 대비 변형량으로 알갱이를 만든다
   prevDepth = 0;
+  readonly id = ++dentSeq;
+  releaseDepth = 0; // 놓는 순간 깊이 (얕게 눌렀으면 '샤아악'도 작게)
   prevCenter = new THREE.Vector3();
   grainAcc = 0;
 
@@ -485,7 +489,7 @@ export class SoapEngine {
     this.audio.unlock();
     const dent = new Dent(id, local, normal, pan);
     this.dents.push(dent);
-    while (this.dents.length > MAX_DENTS) this.dents.shift();
+    while (this.dents.length > MAX_DENTS) this.audio.hissStop(this.dents.shift()!.id);
     this.pointers.set(id, { mode: 'press', dent, last: local.clone() });
     // 소리는 닿는 즉시 낸다. 50ms만 늦어도 손과 귀가 어긋나게 느껴진다.
     // 비누가 꺼지는 순간은 그 소리의 첫 '바삭'에 맞춘다.
@@ -541,7 +545,8 @@ export class SoapEngine {
     if (!p) return;
     this.pointers.delete(e.pointerId);
     if (p.mode === 'press') {
-      this.audio.release(p.dent.depth / TUNING.depth);
+      p.dent.releaseDepth = p.dent.depth;
+      if (p.dent.depth > TUNING.depth * 0.15) this.audio.hissStart(p.dent.id, p.dent.pan);
       p.dent.release();
     }
   };
@@ -586,8 +591,10 @@ export class SoapEngine {
     // 눌림
     for (let i = this.dents.length - 1; i >= 0; i--) {
       const d = this.dents[i];
-      if (!d.update(dt)) this.dents.splice(i, 1);
-      else this.soundFromDent(d, dt);
+      if (!d.update(dt)) {
+        this.dents.splice(i, 1);
+        this.audio.hissStop(d.id);
+      } else this.soundFromDent(d, dt);
     }
     this.syncDents();
     if (this.dents.length) active = true;
@@ -653,7 +660,7 @@ export class SoapEngine {
    * 비누가 실제로 변형된 만큼 소리를 낸다. (녹음 알갱이)
    *  - 눌려 들어간 깊이만큼 '바삭' — 빨리 누를수록 크고 촘촘하게, 멈추면 조용
    *  - 누른 채 문지른 거리만큼 '사각'
-   *  - 다시 부풀어 오르는 만큼 희미하게
+   *  - 놓은 뒤 다시 부풀어 오르는 속도만큼 '샤아아악'
    */
   private soundFromDent(d: Dent, dt: number) {
     const dDepth = (d.depth - d.prevDepth) / TUNING.depth; // 이번 프레임 깊이 변화 (최대 깊이 = 1)
@@ -666,10 +673,10 @@ export class SoapEngine {
       // 끝까지 한 번 누르면 약 30알
       d.grainAcc += dDepth * 30;
       this.emitGrains(d, 'press', THREE.MathUtils.clamp(dDepth / dt / 10, 0.3, 1), dt);
-    } else if (dDepth < 0 && !d.held) {
-      // 다시 부풀 때 약 8알, 아주 작게
-      d.grainAcc += -dDepth * 8;
-      this.emitGrains(d, 'release', THREE.MathUtils.clamp(-dDepth / dt / 3, 0.15, 0.4), dt);
+    } else if (!d.held) {
+      // 다시 부풀 때 '샤아아악' — 부푸는 속도(최대 약 0.87 깊이/초)에 맞춰 크기를 바꾼다
+      const speed = Math.max(0, -dDepth) / dt;
+      this.audio.hissLevel(d.id, (speed / 0.87) * Math.min(1, d.releaseDepth / TUNING.depth));
     }
     if (moved > 0) {
       // 1mm 문지를 때마다 약 1알, 빠를수록 크게
