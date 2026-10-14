@@ -4,7 +4,7 @@
 
 - Next.js 16 (App Router) + three.js, 정적 페이지라 Vercel에 그대로 배포됩니다.
 - 모델: Blender 전달본 `slang_soap.glb`를 웹용으로 줄임 (2.9MB → 0.4MB)
-- 소리: 녹음 파일 없이 Web Audio로 크런치를 합성 (저작권/라이선스 걱정 없음)
+- 소리: 직접 녹음한 효과음 12개 (`public/audio`). 불러오지 못하면 Web Audio 합성음으로 대체
 
 ## 실행
 
@@ -30,6 +30,7 @@ npm run build      # 배포 전 확인
 | `lib/soap/audio.ts` | 크런치 사운드 합성 |
 | `public/models/slang_soap.glb` | 웹용 비누 모델 |
 | `scripts/optimize-model.mjs` | 원본 GLB → 웹용 GLB 변환 |
+| `scripts/prepare-audio.py` | 녹음 효과음 팩 → 웹용 모노 WAV + `public/audio/clips.json` |
 | `scripts/make-stamp.py` | 윗면 'SLANG' 각인 텍스처 굽기 (`public/models/soap_stamp_*.png`) |
 
 ## 원본 전달서와 다르게 한 점
@@ -58,6 +59,24 @@ python3 scripts/make-stamp.py   # numpy, Pillow 필요
 - `depth`, `radius`: 얼마나 깊고 넓게 들어가는지
 - `stiffness`, `damping`: 누를 때 '푹' 들어가는 속도와 출렁임
 - `recoverSlow`, `recoverFast`, `recoverRamp`: 놓은 뒤 쫀득하게 버티다가 돌아오는 느낌
+
+## 효과음 (직접 녹음)
+
+`slangi-audio-pack`의 12개 클립을 씁니다. 파일 내용(볼륨·음높이·속도·EQ)은 바꾸지 않았고, 재생할 때 필요한 값만 `clips.json`에 기록해요.
+
+- 한 번 누를 때마다 한 클립을 재생해요. 손가락 이동마다 재생하지 않아요. 같은 그룹에서 직전 클립은 피하고, `playbackRate`는 1로 고정, 동시 재생은 최대 2개예요.
+- **지연 제거:** 클립 앞의 무음(24~128ms)을 건너뛰고 실제 소리 시작점(`onset`)부터 재생해요.
+- **화면 동기화:** 비누가 '바삭' 꺼지는 순간을 그 클립의 첫 강한 소리(`peak`)에 맞춰요.
+- **크기 맞춤:** 클립 간 크기를 중앙값에 맞추는 재생 배율(`gain`)을 써요. 잡음이 커지지 않게 최대 +6dB까지만 키워요.
+- **색 연결:** 비누 색을 녹음 속 같은 색 물체의 소리에 연결해요. 피치→orange, 핑크→pink, 민트→green_white, 라벤더→blue, 아이보리→전체.
+- **음량:** 기본 음량은 낮게(50%) 시작하고, 설정에서 조절해요.
+- **용량:** 좌우가 같은 녹음이라 모노로 합쳐 용량을 절반으로 줄였어요(약 580KB). MP3/AAC는 앞에 무음 패딩이 생겨 지연이 늘어서 WAV를 유지했어요.
+
+녹음을 바꾸려면 팩 폴더(`web/*.wav` + `manifest.json`)를 준비하고 실행하세요.
+
+```bash
+python3 scripts/prepare-audio.py <slangi-audio-pack 폴더>
+```
 
 ## 소리가 안 날 때 (모바일)
 

@@ -1,0 +1,113 @@
+{
+  "sampleRate": 44100,
+  "clips": [
+    {
+      "id": "green_white_01",
+      "group": "green_white",
+      "file": "/audio/green_white_01.wav",
+      "onset": 0.0279,
+      "peak": 0.0074,
+      "duration": 0.415,
+      "gain": 1.995
+    },
+    {
+      "id": "green_white_02",
+      "group": "green_white",
+      "file": "/audio/green_white_02.wav",
+      "onset": 0.0439,
+      "peak": 0.0178,
+      "duration": 0.29,
+      "gain": 1.995
+    },
+    {
+      "id": "green_white_03",
+      "group": "green_white",
+      "file": "/audio/green_white_03.wav",
+      "onset": 0.0419,
+      "peak": 0.0041,
+      "duration": 0.68,
+      "gain": 1.004
+    },
+    {
+      "id": "green_white_04",
+      "group": "green_white",
+      "file": "/audio/green_white_04.wav",
+      "onset": 0.1197,
+      "peak": 0.0073,
+      "duration": 0.31,
+      "gain": 1.003
+    },
+    {
+      "id": "orange_01",
+      "group": "orange",
+      "file": "/audio/orange_01.wav",
+      "onset": 0.0459,
+      "peak": 0.0644,
+      "duration": 0.65,
+      "gain": 1.309
+    },
+    {
+      "id": "orange_02",
+      "group": "orange",
+      "file": "/audio/orange_02.wav",
+      "onset": 0.0519,
+      "peak": 0.0308,
+      "duration": 0.38,
+      "gain": 1.897
+    },
+    {
+      "id": "orange_03",
+      "group": "orange",
+      "file": "/audio/orange_03.wav",
+      "onset": 0.1237,
+      "peak": 0.1256,
+      "duration": 0.87,
+      "gain": 0.81
+    },
+    {
+      "id": "pink_01",
+      "group": "pink",
+      "file": "/audio/pink_01.wav",
+      "onset": 0.02,
+      "peak": 0.1369,
+      "duration": 0.81,
+      "gain": 0.699
+    },
+    {
+      "id": "pink_02",
+      "group": "pink",
+      "file": "/audio/pink_02.wav",
+      "onset": 0.0239,
+      "peak": 0.0533,
+      "duration": 0.4,
+      "gain": 0.997
+    },
+    {
+      "id": "pink_03",
+      "group": "pink",
+      "file": "/audio/pink_03.wav",
+      "onset": 0.0579,
+      "peak": 0.1715,
+      "duration": 0.57,
+      "gain": 0.759
+    },
+    {
+      "id": "blue_01",
+      "group": "blue",
+      "file": "/audio/blue_01.wav",
+      "onset": 0.0659,
+      "peak": 0.0271,
+      "duration": 0.44,
+      "gain": 0.943
+    },
+    {
+      "id": "blue_02",
+      "group": "blue",
+      "file": "/audio/blue_02.wav",
+      "onset": 0.0798,
+      "peak": 0.0309,
+      "duration": 0.65,
+      "gain": 0.933
+    }
+  ]
+}

@@ -13,6 +13,14 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
 type AudioCtor = typeof AudioContext;
 
+/** public/audio/clips.json (scripts/prepare-audio.py 가 만든다) */
+type ClipInfo = { id: string; group: string; file: string; onset: number; peak: number; duration: number; gain: number };
+type Clip = ClipInfo & { buffer: AudioBuffer };
+type Voice = { src: AudioBufferSourceNode; gain: GainNode; endAt: number };
+
+const MAX_VOICES = 2; // 동시에 나는 녹음 소리 최대 개수
+const DEFAULT_GIVE = 0.04; // 합성음일 때 비누가 꺼지는 시점(초)
+
 /** 핑크 노이즈 (Paul Kellet) */
 function pinkNoise(n: number) {
   const out = new Float32Array(n);
@@ -71,11 +79,19 @@ export class CrunchAudio {
   private crackles: AudioBuffer[] = []; // 사각거림 알갱이
   private bodies: AudioBuffer[] = []; // 낮고 둥근 '톡'
   private airs: AudioBuffer[] = []; // 버티는 동안의 미세한 소리
-  private master: GainNode | null = null;
+  private master: GainNode | null = null; // 합성음 경로
   private bus: AudioNode | null = null;
+  private out: GainNode | null = null; // 최종 음량 (소리 켜기/끄기, 볼륨)
+  private sampleIn: GainNode | null = null; // 녹음 소리 경로 (EQ 없이 그대로)
   private lastScrub = 0;
   private enabled = true;
-  private volume = 0.85;
+  private volume = 0.5; // 기본은 낮게 시작 — 사용자가 조절
+
+  private clips: Clip[] = [];
+  private group: string | null = null; // null = 전체에서 고름
+  private lastClip: Record<string, string> = {};
+  private voices: Voice[] = [];
+  private preloading = false;
 
   private pending: { intensity: number; pan: number; at: number } | null = null;
   private gestureBound = false;
@@ -147,16 +163,31 @@ export class CrunchAudio {
       this.airs.push(bakeGrain(ctx, rand(700, 1800), rand(1, 1.6), rand(0.002, 0.004), rand(0.002, 0.004)));
     }
 
-    // 최종단: 고르게 눌러주는 컴프레서 (튀는 소리 정리)
+    // 최종 음량
+    this.out = ctx.createGain();
+    this.out.gain.value = this.enabled ? this.volume : 0;
+    this.out.connect(ctx.destination);
+
+    // 녹음 소리: EQ·잔향 없이 원음 그대로, 두 개가 겹칠 때만 넘치지 않게 리미터
+    this.sampleIn = ctx.createGain();
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.1;
+    this.sampleIn.connect(limiter).connect(this.out);
+
+    // 합성음(녹음을 못 불러왔을 때 대체): 고르게 눌러주는 컴프레서
     this.master = ctx.createGain();
-    this.master.gain.value = this.enabled ? this.volume : 0;
+    this.master.gain.value = 1.4;
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -24;
     comp.knee.value = 12;
     comp.ratio.value = 3;
     comp.attack.value = 0.003;
     comp.release.value = 0.15;
-    this.master.connect(comp).connect(ctx.destination);
+    this.master.connect(comp).connect(this.out);
 
     // 톤: 귀가 예민한 대역(2.5kHz 이상)은 덜고, 4.5kHz 위는 걷어낸다
     const shelf = ctx.createBiquadFilter();
@@ -191,9 +222,107 @@ export class CrunchAudio {
 
   setEnabled(on: boolean) {
     this.enabled = on;
-    if (this.ctx && this.master) {
-      this.master.gain.setTargetAtTime(on ? this.volume : 0, this.ctx.currentTime, 0.02);
+    this.applyVolume();
+  }
+
+  /** 0~1 */
+  setVolume(v: number) {
+    this.volume = clamp01(v);
+    this.applyVolume();
+  }
+
+  private applyVolume() {
+    if (this.ctx && this.out) {
+      // 귀는 로그로 느끼므로 제곱 곡선
+      const g = this.enabled ? this.volume * this.volume * 1.6 : 0;
+      this.out.gain.setTargetAtTime(g, this.ctx.currentTime, 0.02);
     }
+  }
+
+  /** 비누 색에 맞는 녹음 그룹. null이면 전체에서 고른다. */
+  setGroup(group: string | null) {
+    this.group = group;
+  }
+
+  /**
+   * 녹음 효과음 미리 받기. 오디오 컨텍스트는 만들어 두기만 하고(일시정지 상태),
+   * 실제 재생은 첫 터치에서 켜진 뒤부터. 실패하면 합성음으로 계속.
+   */
+  async preload(url = '/audio/clips.json') {
+    if (this.preloading) return;
+    this.preloading = true;
+    try {
+      if (!this.ctx && !this.create()) return;
+      const ctx = this.ctx!;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const { clips } = (await res.json()) as { clips: ClipInfo[] };
+      const loaded = await Promise.all(
+        clips.map(async (c) => {
+          try {
+            const r = await fetch(c.file);
+            const data = await r.arrayBuffer();
+            // 구형 Safari는 Promise 형태가 없어 콜백으로
+            const buffer = await new Promise<AudioBuffer>((ok, fail) => ctx.decodeAudioData(data, ok, fail));
+            return { ...c, buffer };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (!this.ctx) return; // 그사이 정리됨
+      this.clips = loaded.filter((c): c is Clip => c !== null);
+    } catch {
+      /* 합성음으로 계속 */
+    }
+  }
+
+  get usingSamples() {
+    return this.clips.length > 0;
+  }
+
+  /** 같은 그룹에서 직전 클립은 피해서 고른다 */
+  private pickClip(): Clip | null {
+    const pool = this.clips.filter((c) => !this.group || c.group === this.group);
+    const list = pool.length ? pool : this.clips;
+    if (!list.length) return null;
+    const key = this.group ?? '*';
+    const choices = list.length > 1 ? list.filter((c) => c.id !== this.lastClip[key]) : list;
+    const clip = pick(choices);
+    this.lastClip[key] = clip.id;
+    return clip;
+  }
+
+  /** 녹음 재생. 앞 무음은 건너뛰고(onset) 원래 속도(playbackRate 1)로. 반환: 첫 '바삭'까지 걸리는 시간 */
+  private playClip(intensity: number, pan: number): number | null {
+    const clip = this.pickClip();
+    if (!clip) return null;
+    const ctx = this.ctx!;
+    const now = ctx.currentTime;
+
+    // 동시 재생 제한: 가장 오래된 소리를 20ms 만에 줄이고 멈춤
+    this.voices = this.voices.filter((v) => v.endAt > now);
+    while (this.voices.length >= MAX_VOICES) {
+      const v = this.voices.shift()!;
+      v.gain.gain.setTargetAtTime(0, now, 0.006);
+      try {
+        v.src.stop(now + 0.03);
+      } catch {
+        /* 이미 멈춤 */
+      }
+    }
+
+    const src = ctx.createBufferSource();
+    src.buffer = clip.buffer;
+    src.playbackRate.value = 1;
+    const g = ctx.createGain();
+    g.gain.value = clip.gain * (0.75 + 0.25 * clamp01(intensity));
+    const p = ctx.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, pan * 0.5));
+    src.connect(g).connect(p).connect(this.sampleIn!);
+    src.start(now, clip.onset);
+    this.voices.push({ src, gain: g, endAt: now + clip.duration - clip.onset });
+    return clip.peak;
   }
 
   private get ready() {
@@ -247,13 +376,25 @@ export class CrunchAudio {
     src.start(t, rand(0, 1.5), dur + 0.02);
   }
 
-  /** 누르는 순간의 메인 크런치. intensity 0~1. 지연 없이 바로 낸다. */
-  press(intensity: number, pan = 0) {
-    if (!this.enabled) return;
+  /**
+   * 누르는 순간의 메인 크런치. intensity 0~1. 지연 없이 바로 낸다.
+   * 반환: 소리의 첫 '바삭'까지 걸리는 시간(초) — 화면에서 비누가 꺼지는 순간을 여기에 맞춘다.
+   */
+  press(intensity: number, pan = 0): number {
+    if (!this.enabled) return DEFAULT_GIVE;
     if (!this.ready) {
       this.pending = { intensity, pan, at: performance.now() };
-      return;
+      return DEFAULT_GIVE;
     }
+    if (this.usingSamples) {
+      const peak = this.playClip(intensity, pan);
+      if (peak !== null) return Math.min(0.15, Math.max(0.02, peak));
+    }
+    this.synthPress(intensity, pan);
+    return DEFAULT_GIVE;
+  }
+
+  private synthPress(intensity: number, pan: number) {
     const now = this.ctx!.currentTime + 0.004;
     const k = Math.max(0.25, clamp01(intensity));
 
@@ -284,7 +425,8 @@ export class CrunchAudio {
 
   /** 누른 채로 문지를 때. amount = 이번 프레임 이동량(0~1 정규화) */
   scrub(amount: number, pan = 0) {
-    if (!this.ready || amount <= 0.02) return;
+    // 녹음 소리는 '새 동작'에서만 — 손가락 이동마다 내지 않는다
+    if (!this.ready || amount <= 0.02 || this.usingSamples) return;
     const now = this.ctx!.currentTime;
     if (now - this.lastScrub < 0.06) return;
     this.lastScrub = now;
@@ -297,7 +439,7 @@ export class CrunchAudio {
 
   /** 손을 뗄 때 공기가 빨려 들어가는 '스윽' */
   release(depth: number) {
-    if (!this.ready) return;
+    if (!this.ready || this.usingSamples) return;
     const k = clamp01(depth);
     if (k < 0.05) return;
     const now = this.ctx!.currentTime;
@@ -316,6 +458,8 @@ export class CrunchAudio {
     document.removeEventListener('visibilitychange', this.onGesture);
     this.gestureBound = false;
     this.pending = null;
+    this.voices = [];
+    this.clips = [];
     void this.ctx?.close();
     this.ctx = null;
   }

@@ -10,7 +10,7 @@ export const TUNING = {
   depth: 0.0065,        // 최종 눌림 깊이 (두께 28mm의 약 23%)
   holdExtra: 0.1,       // 1.2초 이상 꾹 누르면 추가로 더 들어가는 비율 (조금만)
   firmStage: 0.45,      // 바삭하기 전 단단하게 버티는 깊이 비율
-  crunchAt: 0.04,       // 이 시간(초) 뒤 '바삭' 하며 꺼짐 — 소리(즉시)와 어긋나지 않게 짧게
+  crunchAt: 0.04,       // 합성음일 때 '바삭' 하며 꺼지는 시점(초). 녹음 소리는 클립마다 첫 '바삭'에 맞춤
   holdTime: 1.2,
   radius: 0.0105,       // 손가락 자국 반경 — 좁을수록 단단한 재질처럼 보임
   stiffness: 1600,      // 누를 때 스프링 — 단단하게 바로 반응
@@ -30,6 +30,15 @@ export const SOAP_TINTS = {
   lavender: '#dcd3f0',
 } as const;
 export type SoapTint = keyof typeof SOAP_TINTS;
+
+/** 비누 색 → 녹음 그룹 (public/audio/clips.json 의 group) */
+const TINT_SOUND_GROUP: Record<SoapTint, string | null> = {
+  ivory: null,
+  peach: 'orange',
+  pink: 'pink',
+  mint: 'green_white',
+  lavender: 'blue',
+};
 
 export type EngineEvents = {
   onProgress?: (ratio: number) => void;
@@ -52,6 +61,7 @@ class Dent {
   held = true;
   age = 0;
   releasedAt = 0;
+  crunchAt = TUNING.crunchAt; // 소리의 첫 '바삭'에 맞춰 바뀜
 
   constructor(public pointerId: number, local: THREE.Vector3, normal: THREE.Vector3, public pan: number) {
     this.center = local.clone();
@@ -68,7 +78,7 @@ class Dent {
       this.normal.lerp(this.targetNormal, ease(20, dt)).normalize();
       const hold = Math.min(this.age / TUNING.holdTime, 1);
       // 1단계: 단단하게 버팀 → 2단계: '바삭' 하며 꺼짐 → 그 뒤로는 거의 안 들어감
-      const stage = this.age < TUNING.crunchAt ? TUNING.firmStage : 1;
+      const stage = this.age < this.crunchAt ? TUNING.firmStage : 1;
       const goal = TUNING.depth * stage * (1 + TUNING.holdExtra * hold * hold);
       const k = TUNING.stiffness;
       const c = 2 * Math.sqrt(k) * TUNING.damping;
@@ -268,7 +278,14 @@ export class SoapEngine {
     this.haptics = on;
   }
 
+  /** 0~1 */
+  setVolume(v: number) {
+    this.audio.setVolume(v);
+  }
+
   setTint(tint: SoapTint) {
+    // 비누 색 ↔ 녹음 속 같은 색 물체의 소리 (아이보리는 전체에서)
+    this.audio.setGroup(TINT_SOUND_GROUP[tint]);
     // 아이보리는 Blender 원본 재질 색을 그대로 쓴다
     if (tint === 'ivory' && this.baseColor) this.tintTarget.copy(this.baseColor);
     else this.tintTarget.set(SOAP_TINTS[tint]);
@@ -353,6 +370,8 @@ export class SoapEngine {
         this.renderer.compile(this.scene, this.camera);
         this.dirty = true;
         this.events.onReady?.();
+        // 화면이 뜬 뒤에 녹음 효과음을 받는다 (첫 화면 로딩을 늦추지 않게)
+        void this.audio.preload();
       },
       (e) => {
         if (e.total) this.events.onProgress?.(e.loaded / e.total);
@@ -464,7 +483,8 @@ export class SoapEngine {
     while (this.dents.length > MAX_DENTS) this.dents.shift();
     this.pointers.set(id, { mode: 'press', dent, last: local.clone() });
     // 소리는 닿는 즉시 낸다. 50ms만 늦어도 손과 귀가 어긋나게 느껴진다.
-    this.audio.press(intensity, pan);
+    // 비누가 꺼지는 순간은 그 소리의 첫 '바삭'에 맞춘다.
+    dent.crunchAt = this.audio.press(intensity, pan);
     if (this.haptics) navigator.vibrate?.([12, 16, 8, 20, 5]);
     this.events.onPress?.();
     this.dirty = true;

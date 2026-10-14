@@ -11,8 +11,9 @@ const TINTS: { id: SoapTint; label: string; color: string }[] = [
   { id: 'lavender', label: '라벤더', color: '#dcd3f0' },
 ];
 
-type Settings = { sound: boolean; haptics: boolean; tint: SoapTint };
-const DEFAULT_SETTINGS: Settings = { sound: true, haptics: true, tint: 'ivory' };
+type Settings = { sound: boolean; volume: number; haptics: boolean; tint: SoapTint };
+// 소리는 낮게 시작해서 직접 키우게 한다
+const DEFAULT_SETTINGS: Settings = { sound: true, volume: 0.5, haptics: true, tint: 'ivory' };
 
 // 브라우저 저장소는 막혀 있을 수 있으므로 항상 실패를 허용한다
 function load<T>(key: string, fallback: T): T {
@@ -97,6 +98,7 @@ export default function SoapPlayground() {
     const e = engineRef.current;
     if (!e) return;
     e.setSound(settings.sound);
+    e.setVolume(settings.volume);
     e.setHaptics(settings.haptics);
     e.setTint(settings.tint);
   }, [settings, ready]);
@@ -219,6 +221,26 @@ export default function SoapPlayground() {
                 onClick={() => update({ sound: !settings.sound })}
               />
             </div>
+
+            {settings.sound && (
+              <div className="row volume-row">
+                <label htmlFor="volume" className="row-text">
+                  <strong>소리 크기</strong>
+                </label>
+                <input
+                  id="volume"
+                  className="slider"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={settings.volume}
+                  style={{ ['--v' as string]: `${settings.volume * 100}%` }}
+                  aria-valuetext={`${Math.round(settings.volume * 100)}%`}
+                  onChange={(e) => update({ volume: Number(e.target.value) })}
+                />
+              </div>
+            )}
 
             {canVibrate && (
               <div className="row">
