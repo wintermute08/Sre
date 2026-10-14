@@ -90,9 +90,14 @@ export class CrunchAudio {
     // 휴대폰 스피커에서 쨍하지 않게 고역을 살짝 깎는다
     const shelf = ctx.createBiquadFilter();
     shelf.type = 'highshelf';
-    shelf.frequency.value = 7000;
-    shelf.gain.value = -5;
-    shelf.connect(this.master);
+    shelf.frequency.value = 3500;
+    shelf.gain.value = -8;
+    // 6.5kHz 위 쇳소리 같은 성분은 걷어낸다
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 6500;
+    lp.Q.value = 0.5;
+    shelf.connect(lp).connect(this.master);
     this.bus = shelf;
 
     // 켜지기 전에 누른 첫 크런치는 켜지는 순간 들려준다
@@ -127,7 +132,7 @@ export class CrunchAudio {
     bp.Q.value = q;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.0006);
+    g.gain.linearRampToValueAtTime(gain, t + 0.0015); // 너무 순간적이면 '틱' 하고 찌름
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     const p = ctx.createStereoPanner();
     p.pan.value = Math.max(-1, Math.min(1, pan));
@@ -158,7 +163,7 @@ export class CrunchAudio {
     src.buffer = this.noise;
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
-    bp.frequency.value = rand(3500, 5500);
+    bp.frequency.value = rand(2000, 3200);
     bp.Q.value = 0.7;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
@@ -178,7 +183,7 @@ export class CrunchAudio {
     const t0 = this.ctx!.currentTime + 0.004;
     const k = Math.max(0.25, clamp01(intensity));
 
-    this.thump(t0, 0.45 * k);
+    this.thump(t0, 0.55 * k);
 
     const span = rand(0.14, 0.2) + 0.08 * k; // 눌림 시간(0.12~0.2s)과 맞춤
     const n = Math.round(rand(45, 60) + 45 * k);
@@ -186,13 +191,13 @@ export class CrunchAudio {
       const t = t0 + span * Math.pow(Math.random(), 1.9); // 앞쪽에 몰리게
       if (Math.random() < 0.1) {
         // 가끔 크게 '딱' 부서지는 알갱이
-        this.grain(t, logRand(700, 1700), rand(1.2, 2.5), rand(0.01, 0.02), rand(0.5, 0.85) * k, pan + rand(-0.2, 0.2));
+        this.grain(t, logRand(500, 1300), rand(1.2, 2.5), rand(0.01, 0.02), rand(0.4, 0.7) * k, pan + rand(-0.2, 0.2));
       } else {
         const gain = (0.12 + Math.pow(Math.random(), 3) * 0.6) * k;
-        this.grain(t, logRand(1300, 9000), rand(0.9, 4), logRand(0.0018, 0.011), gain, pan + rand(-0.35, 0.35));
+        this.grain(t, logRand(900, 5500), rand(0.9, 4), logRand(0.0018, 0.011), gain, pan + rand(-0.35, 0.35));
       }
     }
-    this.fizz(t0, 0.07 * k, span * 1.1);
+    this.fizz(t0, 0.045 * k, span * 1.1);
   }
 
   /** 누른 채로 문지를 때. amount = 이번 프레임 이동량(0~1 정규화) */
@@ -204,7 +209,7 @@ export class CrunchAudio {
     const k = clamp01(amount);
     const n = Math.max(1, Math.round(k * 14));
     for (let i = 0; i < n; i++) {
-      this.grain(now + rand(0, 0.05), logRand(1500, 8500), rand(1, 3.5), logRand(0.0015, 0.008), rand(0.08, 0.32) * k, pan + rand(-0.3, 0.3));
+      this.grain(now + rand(0, 0.05), logRand(1000, 5000), rand(1, 3.5), logRand(0.0015, 0.008), rand(0.08, 0.32) * k, pan + rand(-0.3, 0.3));
     }
   }
 
@@ -216,7 +221,7 @@ export class CrunchAudio {
     let count = Math.floor(expected) + (Math.random() < expected % 1 ? 1 : 0);
     const now = this.ctx!.currentTime;
     while (count-- > 0) {
-      this.grain(now + rand(0, dt), logRand(2200, 8000), rand(1, 3), logRand(0.0012, 0.005), rand(0.03, 0.12) * clamp01(rate * 1.5), pan + rand(-0.4, 0.4));
+      this.grain(now + rand(0, dt), logRand(1500, 5000), rand(1, 3), logRand(0.0012, 0.005), rand(0.03, 0.12) * clamp01(rate * 1.5), pan + rand(-0.4, 0.4));
     }
   }
 
