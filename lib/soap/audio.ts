@@ -18,39 +18,91 @@ export class CrunchAudio {
   private enabled = true;
   private volume = 0.9;
 
-  /** 사용자 제스처 안에서 호출해야 iOS/안드로이드에서 소리가 난다 */
+  private pending: { intensity: number; pan: number; at: number } | null = null;
+  private gestureBound = false;
+
+  /**
+   * 오디오 준비. 아무 때나 불러도 되지만 실제로 켜지는 건 '사용자 활성화' 제스처 안에서뿐이다.
+   * 주의: 터치에서는 pointerdown이 활성화 제스처가 아니다(pointerup / touchend / click만 해당).
+   * 그래서 첫 터치의 pointerdown에서는 꺼져 있을 수 있고, 손을 떼는 순간 켜진다.
+   */
   unlock(): boolean {
-    if (!this.ctx) {
-      const AC: AudioCtor | undefined =
-        window.AudioContext ?? (window as unknown as { webkitAudioContext?: AudioCtor }).webkitAudioContext;
-      if (!AC) return false;
-      const ctx = new AC({ latencyHint: 'interactive' });
-      this.ctx = ctx;
-
-      const len = ctx.sampleRate * 2;
-      this.noise = ctx.createBuffer(1, len, ctx.sampleRate);
-      const ch = this.noise.getChannelData(0);
-      for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
-
-      this.master = ctx.createGain();
-      this.master.gain.value = this.enabled ? this.volume : 0;
-      const comp = ctx.createDynamicsCompressor();
-      comp.threshold.value = -16;
-      comp.knee.value = 8;
-      comp.ratio.value = 4;
-      comp.attack.value = 0.002;
-      comp.release.value = 0.12;
-      this.master.connect(comp).connect(ctx.destination);
-
-      // 휴대폰 스피커에서 쨍하지 않게 고역을 살짝 깎는다
-      const shelf = ctx.createBiquadFilter();
-      shelf.type = 'highshelf';
-      shelf.frequency.value = 7000;
-      shelf.gain.value = -5;
-      shelf.connect(this.master);
-      this.bus = shelf;
+    if (!this.ctx && !this.create()) return false;
+    const ctx = this.ctx!;
+    if (ctx.state !== 'running') {
+      // iOS 구버전: 제스처 안에서 무음 버퍼를 한 번 재생해야 풀린다
+      try {
+        const b = ctx.createBufferSource();
+        b.buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+        b.connect(ctx.destination);
+        b.start(0);
+      } catch {
+        /* 무시 */
+      }
+      ctx.resume().catch(() => {});
     }
-    if (this.ctx.state === 'suspended') void this.ctx.resume();
+    return true;
+  }
+
+  /** 페이지 어디를 탭해도 오디오가 켜지도록 활성화 제스처에 연결 */
+  bindGestures() {
+    if (this.gestureBound) return;
+    this.gestureBound = true;
+    const opts = { capture: true, passive: true } as const;
+    for (const type of ['pointerup', 'touchend', 'click', 'keydown'] as const) {
+      window.addEventListener(type, this.onGesture, opts);
+    }
+    document.addEventListener('visibilitychange', this.onGesture);
+  }
+
+  private onGesture = () => {
+    if (document.visibilityState === 'hidden') return;
+    if (!this.ctx || this.ctx.state !== 'running') this.unlock();
+  };
+
+  private create(): boolean {
+    const AC: AudioCtor | undefined =
+      window.AudioContext ?? (window as unknown as { webkitAudioContext?: AudioCtor }).webkitAudioContext;
+    if (!AC) return false;
+    let ctx: AudioContext;
+    try {
+      ctx = new AC({ latencyHint: 'interactive' });
+    } catch {
+      ctx = new AC();
+    }
+    this.ctx = ctx;
+
+    const len = ctx.sampleRate * 2;
+    this.noise = ctx.createBuffer(1, len, ctx.sampleRate);
+    const ch = this.noise.getChannelData(0);
+    for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
+
+    this.master = ctx.createGain();
+    this.master.gain.value = this.enabled ? this.volume : 0;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -16;
+    comp.knee.value = 8;
+    comp.ratio.value = 4;
+    comp.attack.value = 0.002;
+    comp.release.value = 0.12;
+    this.master.connect(comp).connect(ctx.destination);
+
+    // 휴대폰 스피커에서 쨍하지 않게 고역을 살짝 깎는다
+    const shelf = ctx.createBiquadFilter();
+    shelf.type = 'highshelf';
+    shelf.frequency.value = 7000;
+    shelf.gain.value = -5;
+    shelf.connect(this.master);
+    this.bus = shelf;
+
+    // 켜지기 전에 누른 첫 크런치는 켜지는 순간 들려준다
+    ctx.addEventListener('statechange', () => {
+      if (ctx.state !== 'running' || !this.pending) return;
+      const p = this.pending;
+      this.pending = null;
+      // 꾹 누르고 있다가 떼는 경우도 있으니 넉넉히 기다린다
+      if (performance.now() - p.at < 4000) this.press(p.intensity * 0.8, p.pan);
+    });
     return true;
   }
 
@@ -118,7 +170,11 @@ export class CrunchAudio {
 
   /** 누르는 순간의 메인 크런치. intensity 0~1 */
   press(intensity: number, pan = 0) {
-    if (!this.ready) return;
+    if (!this.enabled) return;
+    if (!this.ready) {
+      this.pending = { intensity, pan, at: performance.now() };
+      return;
+    }
     const t0 = this.ctx!.currentTime + 0.004;
     const k = Math.max(0.25, clamp01(intensity));
 
@@ -173,6 +229,12 @@ export class CrunchAudio {
   }
 
   dispose() {
+    for (const type of ['pointerup', 'touchend', 'click', 'keydown'] as const) {
+      window.removeEventListener(type, this.onGesture, true);
+    }
+    document.removeEventListener('visibilitychange', this.onGesture);
+    this.gestureBound = false;
+    this.pending = null;
     void this.ctx?.close();
     this.ctx = null;
   }

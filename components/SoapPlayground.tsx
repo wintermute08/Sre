@@ -101,12 +101,30 @@ export default function SoapPlayground() {
     e.setTint(settings.tint);
   }, [settings, ready]);
 
+  // 시트: 열리면 제목부터 읽히도록 시트에 초점, 닫히면 설정 버튼으로 초점 복귀
+  const sheetRef = useRef<HTMLElement>(null);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (!sheetOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setSheetOpen(false);
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    if (sheetOpen) {
+      wasOpen.current = true;
+      sheetRef.current?.focus();
+      const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setSheetOpen(false);
+      window.addEventListener('keydown', onKey);
+      return () => window.removeEventListener('keydown', onKey);
+    }
+    if (wasOpen.current) openerRef.current?.focus();
   }, [sheetOpen]);
+
+  // 라디오 그룹은 화살표 키로 이동
+  const onTintKey = (e: React.KeyboardEvent, i: number) => {
+    const d = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
+    if (!d) return;
+    e.preventDefault();
+    const next = TINTS[(i + d + TINTS.length) % TINTS.length];
+    update({ tint: next.id });
+    (e.currentTarget.parentElement?.children[(i + d + TINTS.length) % TINTS.length] as HTMLElement | undefined)?.focus();
+  };
 
   const update = (patch: Partial<Settings>) => {
     setSettings((s) => {
@@ -118,6 +136,7 @@ export default function SoapPlayground() {
 
   return (
     <main className="stage">
+      <div className="stage-content" inert={sheetOpen}>
       <canvas
         ref={canvasRef}
         tabIndex={0}
@@ -129,7 +148,7 @@ export default function SoapPlayground() {
           <h1>슬랑 비누</h1>
           <p>꾹 누르면 바삭, 놓으면 말랑해요</p>
         </div>
-        <button className="icon-button" aria-label="설정 열기" onClick={() => setSheetOpen(true)}>
+        <button ref={openerRef} className="icon-button" aria-label="설정 열기" onClick={() => setSheetOpen(true)}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             <circle cx="16" cy="7" r="2" stroke="currentColor" strokeWidth="2" />
@@ -143,7 +162,7 @@ export default function SoapPlayground() {
       <footer className="footer">
         {ready && !coached && <p className="hint">비누를 꾹 눌러보세요</p>}
         {ready && coached && (
-          <p className="counter" aria-live="polite">
+          <p className="counter">
             오늘 <strong>{count.toLocaleString('ko-KR')}</strong>번 눌렀어요
           </p>
         )}
@@ -170,24 +189,33 @@ export default function SoapPlayground() {
           </div>
         </div>
       )}
+      </div>
 
       {sheetOpen && (
         <>
           <div className="sheet-dim" onClick={() => setSheetOpen(false)} />
-          <section className="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+          <section
+            ref={sheetRef}
+            tabIndex={-1}
+            className="sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sheet-title"
+          >
             <div className="sheet-handle" />
             <h2 id="sheet-title">설정</h2>
 
             <div className="row">
               <div className="row-text">
-                <strong>소리</strong>
-                <span>아이폰은 무음 모드를 끄면 들려요</span>
+                <strong id="sound-label">소리</strong>
+                <span id="sound-desc">아이폰은 무음 모드를 끄면 들려요</span>
               </div>
               <button
                 className="switch"
                 role="switch"
                 aria-checked={settings.sound}
-                aria-label="소리"
+                aria-labelledby="sound-label"
+                aria-describedby="sound-desc"
                 onClick={() => update({ sound: !settings.sound })}
               />
             </div>
@@ -195,14 +223,15 @@ export default function SoapPlayground() {
             {canVibrate && (
               <div className="row">
                 <div className="row-text">
-                  <strong>진동</strong>
-                  <span>누를 때 손끝으로 바삭함을 느껴요</span>
+                  <strong id="haptics-label">진동</strong>
+                  <span id="haptics-desc">누를 때 손끝으로 바삭함을 느껴요</span>
                 </div>
                 <button
                   className="switch"
                   role="switch"
                   aria-checked={settings.haptics}
-                  aria-label="진동"
+                  aria-labelledby="haptics-label"
+                  aria-describedby="haptics-desc"
                   onClick={() => update({ haptics: !settings.haptics })}
                 />
               </div>
@@ -212,12 +241,14 @@ export default function SoapPlayground() {
               <strong id="tint-label">비누 색</strong>
             </div>
             <div className="tints" role="radiogroup" aria-labelledby="tint-label">
-              {TINTS.map((t) => (
+              {TINTS.map((t, i) => (
                 <button
                   key={t.id}
                   className="tint"
                   role="radio"
                   aria-checked={settings.tint === t.id}
+                  tabIndex={settings.tint === t.id ? 0 : -1}
+                  onKeyDown={(e) => onTintKey(e, i)}
                   onClick={() => update({ tint: t.id })}
                 >
                   <i style={{ ['--c' as string]: t.color }} />
@@ -226,7 +257,7 @@ export default function SoapPlayground() {
               ))}
             </div>
 
-            <button className="cta" onClick={() => setSheetOpen(false)} autoFocus>
+            <button className="cta" onClick={() => setSheetOpen(false)}>
               확인
             </button>
           </section>

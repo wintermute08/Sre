@@ -60,16 +60,16 @@ vec3 deformSoap(vec3 p) {
 export function createSoapMaterial(source: THREE.MeshStandardMaterial, uniforms: DentUniforms) {
   const mat = new THREE.MeshPhysicalMaterial({
     color: source.color.clone(),
-    roughness: 0.5,
+    roughness: 0.42,
     metalness: 0,
     normalMap: source.normalMap,
-    normalScale: source.normalScale.clone(),
+    normalScale: source.normalScale.clone().multiplyScalar(1.6), // 각인을 조금 더 또렷하게
     // 뽀얀 분가루 느낌
     sheen: 0.25,
     sheenRoughness: 0.8,
     sheenColor: new THREE.Color('#ffffff'),
-    clearcoat: 0.12,
-    clearcoatRoughness: 0.6,
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.45,
     side: THREE.FrontSide,
   });
 

@@ -4,12 +4,13 @@
   --surface: #ffffff;
   --grey-900: #191f28;
   --grey-700: #4e5968;
-  --grey-600: #6b7684;
+  --grey-600: #636e7b; /* 토스 grey600보다 살짝 진하게: 배경 대비 4.5:1 이상 */
   --grey-500: #8b95a1;
   --grey-200: #e5e8eb;
   --grey-100: #f2f4f6;
-  --blue: #3182f6;
-  --blue-pressed: #1b64da;
+  --blue: #1b64da; /* 흰 글자 대비 4.5:1 이상 */
+  --blue-pressed: #1957c2;
+  --blue-text: #1b64da;
   --dim: rgba(0, 0, 0, 0.4);
   --chip: rgba(255, 255, 255, 0.86);
   --radius-l: 24px;
@@ -31,6 +32,7 @@
     --grey-100: #2c2c35;
     --dim: rgba(0, 0, 0, 0.6);
     --chip: rgba(44, 44, 53, 0.86);
+    --blue-text: #6ea8fe;
     color-scheme: dark;
   }
 }
@@ -67,6 +69,15 @@ button {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+}
+
+.stage-content {
+  position: absolute;
+  inset: 0;
+}
+
+.sheet:focus {
+  outline: none;
 }
 
 .stage canvas {
@@ -146,7 +157,7 @@ button {
   margin: -40px 0 0 -32px;
   border-radius: 50%;
   pointer-events: none;
-  border: 2px solid rgba(49, 130, 246, 0.55);
+  border: 2px solid rgba(27, 100, 218, 0.55);
   animation: coach 1.6s var(--ease) infinite;
   transition: opacity 0.4s;
 }
@@ -199,7 +210,7 @@ button {
 }
 
 .counter strong {
-  color: var(--blue);
+  color: var(--blue-text);
   font-weight: 700;
 }
 

@@ -175,22 +175,44 @@ export class SoapEngine {
   private size = { w: 1, h: 1 };
   private tintTarget = new THREE.Color(SOAP_TINTS.ivory);
   private baseColor: THREE.Color | null = null;
+  private reducedMotion = false;
+  private sway = 1; // 가만히 있을 때 살짝 흔들리는 정도 (만지면 0으로)
+  private time = 0;
 
   constructor(private canvas: HTMLCanvasElement, private events: EngineEvents = {}) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.toneMapping = THREE.NeutralToneMapping;
-    this.renderer.toneMappingExposure = 1.2;
+    this.renderer.toneMappingExposure = 1.05;
+    // 바닥에 떨어지는 부드러운 실제 그림자 — 비누가 '놓여 있는' 느낌의 핵심
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.VSMShadowMap;
 
     // 약한 환경광 + 옆에서 부드러운 키 라이트 (정면 강한 빛은 비누를 흰 덩어리로 만듦)
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.3;
+    this.scene.environmentIntensity = 0.35;
     pmrem.dispose();
 
-    const key = new THREE.DirectionalLight('#fff1dc', 3.4);
-    key.position.set(-0.75, 0.42, 0.2);
+    // 낮은 각도의 옆빛이어야 윗면 곡률·눌린 자국·각인이 드러난다
+    const key = new THREE.DirectionalLight('#fff1dc', 3.0);
+    key.position.set(-0.5, 0.3, 0.12);
+    key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.radius = 12;
+    key.shadow.blurSamples = 16;
+    key.shadow.bias = -0.0004;
+    key.shadow.normalBias = 0.0006;
+    const sc = key.shadow.camera as THREE.OrthographicCamera;
+    sc.left = -0.16;
+    sc.right = 0.16;
+    sc.top = 0.16;
+    sc.bottom = -0.16;
+    sc.near = 0.2;
+    sc.far = 0.9;
     this.scene.add(key);
+    // 아랫면은 어둡게, 윗면은 밝게 — 두께감
+    this.scene.add(new THREE.HemisphereLight('#ffffff', '#a39b8e', 0.35));
     const fill = new THREE.DirectionalLight('#e3f6ff', 0.45);
     fill.position.set(0.7, 0.35, 0.4);
     this.scene.add(fill);
@@ -200,6 +222,14 @@ export class SoapEngine {
 
     this.shadow = this.makeShadow();
     this.scene.add(this.shadow);
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.6), new THREE.ShadowMaterial({ opacity: 0.16 }));
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.0145;
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+
+    this.reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    this.audio.bindGestures();
     this.scene.add(this.soapGroup);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -288,6 +318,7 @@ export class SoapEngine {
 
         const soap = new THREE.Mesh(geometry, material);
         soap.frustumCulled = false;
+        soap.castShadow = true;
         soap.morphTargetDictionary = { ...(src.morphTargetDictionary ?? {}) };
         soap.morphTargetInfluences = (src.morphTargetInfluences ?? []).map(() => 0);
         this.morphIndex = soap.morphTargetDictionary;
@@ -333,11 +364,11 @@ export class SoapEngine {
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
     const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.104 * 1.45, 0.066 * 1.6),
+      new THREE.PlaneGeometry(0.104 * 1.2, 0.066 * 1.3),
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }),
     );
     mesh.rotation.x = -Math.PI / 2;
-    mesh.position.y = -0.0155;
+    mesh.position.y = -0.0143;
     return mesh;
   }
 
@@ -353,11 +384,13 @@ export class SoapEngine {
     const tan = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
     // 세로 화면 기준: 비누 가로가 화면 폭의 ~78%를 채우도록
     const dW = (0.104 / 0.78) / (2 * tan * cam.aspect);
-    const dH = (0.066 * 1.9) / (2 * tan);
+    const dH = (0.066 * 2.1) / (2 * tan);
     const dist = Math.max(dW, dH);
-    const dir = new THREE.Vector3(0, 0.86, 0.5).normalize();
+    // 너무 위에서 내려다보면 납작해 보임 — 옆면 두께가 보이도록 약 45°
+    const dir = new THREE.Vector3(0, 0.72, 0.7).normalize();
     cam.position.copy(dir.multiplyScalar(dist));
-    cam.lookAt(0, -0.002, 0);
+    // 윗면 가운데가 화면 정중앙에 오도록 (첫 안내 링 위치와 일치)
+    cam.lookAt(0, 0.012, 0);
     cam.updateProjectionMatrix();
     this.dirty = true;
   }
@@ -434,6 +467,8 @@ export class SoapEngine {
   };
 
   private onUp = (e: PointerEvent) => {
+    // 터치에서는 손을 뗄 때가 오디오를 켤 수 있는 순간
+    if (e.type === 'pointerup') this.audio.unlock();
     const p = this.pointers.get(e.pointerId);
     if (!p) return;
     this.pointers.delete(e.pointerId);
@@ -472,8 +507,10 @@ export class SoapEngine {
     this.last = now;
     if (!this.soap) {
       if (this.dirty) this.render();
+      this.dirty = false;
       return;
     }
+    this.time += dt;
 
     let active = this.dirty;
 
@@ -516,7 +553,14 @@ export class SoapEngine {
       t.y *= 1 - ease(4, dt);
     }
     if (Math.abs(t.x) + Math.abs(t.y) > 1e-4) active = true;
-    this.soapGroup.rotation.set(t.x, t.y, 0);
+
+    // 가만히 있을 땐 아주 천천히 흔들려 입체감을 보여주고, 만지는 동안엔 멈춤
+    const touching = this.pointers.size > 0 || this.dents.length > 0;
+    this.sway += ((touching || this.reducedMotion ? 0 : 1) - this.sway) * ease(touching ? 6 : 0.8, dt);
+    const sx = Math.sin(this.time * 0.55) * 0.045 * this.sway;
+    const sy = Math.sin(this.time * 0.37 + 1.3) * 0.11 * this.sway;
+    if (this.sway > 1e-3) active = true;
+    this.soapGroup.rotation.set(t.x + sx, t.y + sy, 0);
 
     // 색 전환
     if (this.material && !this.material.color.equals(this.tintTarget)) {
