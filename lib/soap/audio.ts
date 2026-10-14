@@ -1,22 +1,81 @@
 // 크런치 사운드 합성 엔진 — 샘플 파일 없이 Web Audio로 매번 조금씩 다르게 만든다.
-// 원리: 1~12ms짜리 아주 짧은 노이즈 알갱이(grain)를 수십 개 앞쪽에 몰리게 뿌리면
-// 압축된 알갱이가 부서지는 '사각사각 크런치'가 된다. 여기에 낮은 '퍽' 바디를 깐다.
+// 목표는 'ASMR처럼 계속 듣기 좋은' 사각거림:
+//  - 쨍한 화이트 노이즈 대신 부드러운 핑크 노이즈
+//  - 크게 튀는 '딱' 없이, 작고 고른 알갱이를 촘촘하게 (피크/평균 차이를 줄임)
+//  - 귀가 예민한 2~5kHz는 덜고, 따뜻한 중음역(450~3200Hz) 위주
+//  - 아주 짧은 잔향으로 귀 가까이에서 나는 소리처럼
+// 알갱이는 시작할 때 미리 구워 두고(BufferSource 1개 + Gain + Panner) 재사용해 휴대폰 부담을 줄인다.
 // 음량은 항상 실제 변형량(깊이, 이동량, 복원 속도)에 연결한다.
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
-const logRand = (a: number, b: number) => Math.exp(rand(Math.log(a), Math.log(b)));
+const pick = <T,>(arr: T[]) => arr[(Math.random() * arr.length) | 0];
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
 type AudioCtor = typeof AudioContext;
 
+/** 핑크 노이즈 (Paul Kellet) */
+function pinkNoise(n: number) {
+  const out = new Float32Array(n);
+  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+  for (let i = 0; i < n; i++) {
+    const w = Math.random() * 2 - 1;
+    b0 = 0.99886 * b0 + w * 0.0555179;
+    b1 = 0.99332 * b1 + w * 0.0750759;
+    b2 = 0.969 * b2 + w * 0.153852;
+    b3 = 0.8665 * b3 + w * 0.3104856;
+    b4 = 0.55 * b4 + w * 0.5329522;
+    b5 = -0.7616 * b5 - w * 0.016898;
+    out[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
+    b6 = w * 0.115926;
+  }
+  return out;
+}
+
+/** RBJ 밴드패스 (JS에서 미리 굽기용) */
+function bandpass(x: Float32Array, sr: number, f: number, q: number) {
+  const w = (2 * Math.PI * f) / sr;
+  const alpha = Math.sin(w) / (2 * q);
+  const a0 = 1 + alpha;
+  const b0 = alpha / a0, b2 = -alpha / a0, a1 = (-2 * Math.cos(w)) / a0, a2 = (1 - alpha) / a0;
+  const y = new Float32Array(x.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const v = b0 * x[i] + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = x[i]; y2 = y1; y1 = v; y[i] = v;
+  }
+  return y;
+}
+
+/** 짧은 알갱이 하나를 굽는다: 둥근 시작 + 지수 감쇠, 피크 1로 정규화 */
+function bakeGrain(ctx: BaseAudioContext, f: number, q: number, attack: number, tau: number) {
+  const sr = ctx.sampleRate;
+  const len = Math.ceil(sr * (attack + tau * 6));
+  const src = pinkNoise(len + 256);
+  const y = bandpass(src, sr, f, q).subarray(256);
+  let peak = 1e-6;
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    const env = t < attack ? Math.sin((t / attack) * Math.PI * 0.5) ** 2 : Math.exp(-(t - attack) / tau);
+    y[i] *= env;
+    peak = Math.max(peak, Math.abs(y[i]));
+  }
+  const buf = ctx.createBuffer(1, len, sr);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) ch[i] = y[i] / peak;
+  return buf;
+}
+
 export class CrunchAudio {
   private ctx: AudioContext | null = null;
   private noise: AudioBuffer | null = null;
+  private crackles: AudioBuffer[] = []; // 사각거림 알갱이
+  private bodies: AudioBuffer[] = []; // 낮고 둥근 '톡'
+  private airs: AudioBuffer[] = []; // 버티는 동안의 미세한 소리
   private master: GainNode | null = null;
   private bus: AudioNode | null = null;
   private lastScrub = 0;
   private enabled = true;
-  private volume = 0.9;
+  private volume = 0.85;
 
   private pending: { intensity: number; pan: number; at: number } | null = null;
   private gestureBound = false;
@@ -74,30 +133,49 @@ export class CrunchAudio {
 
     const len = ctx.sampleRate * 2;
     this.noise = ctx.createBuffer(1, len, ctx.sampleRate);
-    const ch = this.noise.getChannelData(0);
-    for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
+    this.noise.getChannelData(0).set(pinkNoise(len));
 
+    // 알갱이 미리 굽기 (약 30ms 분량 × 50개, 시작 시 한 번)
+    for (let i = 0; i < 36; i++) {
+      const f = Math.exp(rand(Math.log(450), Math.log(3200)));
+      this.crackles.push(bakeGrain(ctx, f, rand(0.7, 1.3), rand(0.0015, 0.003), rand(0.003, 0.009)));
+    }
+    for (let i = 0; i < 8; i++) {
+      this.bodies.push(bakeGrain(ctx, rand(180, 480), rand(0.6, 1), rand(0.003, 0.006), rand(0.012, 0.025)));
+    }
+    for (let i = 0; i < 8; i++) {
+      this.airs.push(bakeGrain(ctx, rand(700, 1800), rand(1, 1.6), rand(0.002, 0.004), rand(0.002, 0.004)));
+    }
+
+    // 최종단: 고르게 눌러주는 컴프레서 (튀는 소리 정리)
     this.master = ctx.createGain();
     this.master.gain.value = this.enabled ? this.volume : 0;
     const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -16;
-    comp.knee.value = 8;
-    comp.ratio.value = 4;
-    comp.attack.value = 0.002;
-    comp.release.value = 0.12;
+    comp.threshold.value = -24;
+    comp.knee.value = 12;
+    comp.ratio.value = 3;
+    comp.attack.value = 0.003;
+    comp.release.value = 0.15;
     this.master.connect(comp).connect(ctx.destination);
 
-    // 휴대폰 스피커에서 쨍하지 않게 고역을 살짝 깎는다
+    // 톤: 귀가 예민한 대역(2.5kHz 이상)은 덜고, 4.5kHz 위는 걷어낸다
     const shelf = ctx.createBiquadFilter();
     shelf.type = 'highshelf';
-    shelf.frequency.value = 3500;
-    shelf.gain.value = -8;
-    // 6.5kHz 위 쇳소리 같은 성분은 걷어낸다
+    shelf.frequency.value = 2500;
+    shelf.gain.value = -6;
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 6500;
+    lp.frequency.value = 4500;
     lp.Q.value = 0.5;
-    shelf.connect(lp).connect(this.master);
+    shelf.connect(lp);
+    lp.connect(this.master);
+
+    // 아주 짧은 잔향: 귀 가까이에서 나는 듯한 따뜻함
+    const verb = ctx.createConvolver();
+    verb.buffer = this.makeRoom(ctx);
+    const wet = ctx.createGain();
+    wet.gain.value = 0.22;
+    lp.connect(verb).connect(wet).connect(this.master);
     this.bus = shelf;
 
     // 켜지기 전에 누른 첫 크런치는 켜지는 순간 들려준다
@@ -122,55 +200,51 @@ export class CrunchAudio {
     return this.enabled && this.ctx !== null && this.ctx.state === 'running';
   }
 
-  private grain(t: number, freq: number, q: number, dur: number, gain: number, pan = 0) {
-    const ctx = this.ctx!;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.value = freq;
-    bp.Q.value = q;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.0015); // 너무 순간적이면 '틱' 하고 찌름
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    const p = ctx.createStereoPanner();
-    p.pan.value = Math.max(-1, Math.min(1, pan));
-    src.connect(bp).connect(g).connect(p).connect(this.bus!);
-    src.start(t, rand(0, 1.9), dur + 0.02);
+  private makeRoom(ctx: BaseAudioContext) {
+    const sr = ctx.sampleRate;
+    const len = Math.ceil(sr * 0.12);
+    const ir = ctx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = ir.getChannelData(c);
+      let lp = 0;
+      for (let i = 0; i < len; i++) {
+        lp += 0.25 * ((Math.random() * 2 - 1) - lp); // 어둡게
+        d[i] = lp * Math.exp(-i / (sr * 0.022));
+      }
+    }
+    return ir;
   }
 
-  private thump(t: number, gain: number, from = 900, to = 250, dur = 0.09) {
+  /** 미리 구운 알갱이 재생 */
+  private play(buf: AudioBuffer, t: number, gain: number, pan = 0, rate = 1) {
+    const ctx = this.ctx!;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = rate;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    const p = ctx.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, pan));
+    src.connect(g).connect(p).connect(this.bus!);
+    src.start(t);
+  }
+
+  /** 낮게 '퍽' — 몸체가 눌리는 느낌 */
+  private thump(t: number, gain: number, from = 600, to = 180, dur = 0.12) {
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
     src.buffer = this.noise;
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.Q.value = 0.9;
+    lp.Q.value = 0.7;
     lp.frequency.setValueAtTime(from, t);
     lp.frequency.exponentialRampToValueAtTime(to, t + dur);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.006);
+    g.gain.linearRampToValueAtTime(gain, t + 0.012);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     src.connect(lp).connect(g).connect(this.master!);
     src.start(t, rand(0, 1.5), dur + 0.02);
-  }
-
-  private fizz(t: number, gain: number, dur: number) {
-    const ctx = this.ctx!;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.value = rand(2000, 3200);
-    bp.Q.value = 0.7;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.01);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    src.connect(bp).connect(g).connect(this.bus!);
-    src.start(t, rand(0, 1.4), dur + 0.02);
   }
 
   /** 누르는 순간의 메인 크런치. intensity 0~1 */
@@ -188,27 +262,35 @@ export class CrunchAudio {
     const k = Math.max(0.25, clamp01(intensity));
 
     // 버티는 동안: 아주 작게 '찌직'
-    const pre = giveAt > 0 ? Math.round(rand(4, 8)) : 0;
-    for (let i = 0; i < pre; i++) {
-      this.grain(now + giveAt * Math.random(), logRand(1200, 4000), rand(1.5, 4), logRand(0.0012, 0.004), rand(0.03, 0.09) * k, pan + rand(-0.2, 0.2));
+    if (giveAt > 0) {
+      const pre = Math.round(rand(5, 9));
+      for (let i = 0; i < pre; i++) {
+        this.play(pick(this.airs), now + giveAt * Math.random(), rand(0.03, 0.06) * k, pan + rand(-0.2, 0.2), rand(0.9, 1.1));
+      }
     }
 
     const t0 = now + giveAt;
-    this.thump(t0, 0.55 * k);
+    this.thump(t0, 0.32 * k);
 
-    const span = rand(0.14, 0.2) + 0.08 * k; // 눌림 시간(0.12~0.2s)과 맞춤
-    const n = Math.round(rand(45, 60) + 45 * k);
+    // 메인: 작고 고른 알갱이를 촘촘하게 (크게 튀는 알갱이 없음)
+    const span = rand(0.22, 0.3) + 0.06 * k;
+    const n = Math.round(rand(110, 140) + 40 * k);
     for (let i = 0; i < n; i++) {
-      const t = t0 + span * Math.pow(Math.random(), 1.9); // 앞쪽에 몰리게
-      if (Math.random() < 0.1) {
-        // 가끔 크게 '딱' 부서지는 알갱이
-        this.grain(t, logRand(500, 1300), rand(1.2, 2.5), rand(0.01, 0.02), rand(0.4, 0.7) * k, pan + rand(-0.2, 0.2));
-      } else {
-        const gain = (0.12 + Math.pow(Math.random(), 3) * 0.6) * k;
-        this.grain(t, logRand(900, 5500), rand(0.9, 4), logRand(0.0018, 0.011), gain, pan + rand(-0.35, 0.35));
-      }
+      const u = Math.pow(Math.random(), 1.5); // 앞쪽에 살짝 몰리게
+      const fade = 1 - 0.6 * u; // 뒤로 갈수록 작아짐
+      this.play(pick(this.crackles), t0 + span * u, rand(0.07, 0.12) * fade * k, pan + rand(-0.45, 0.45), rand(0.85, 1.15));
     }
-    this.fizz(t0, 0.045 * k, span * 1.1);
+    // 둥근 '톡'이 몇 개 섞이면 바삭함에 무게가 생김
+    const bodies = Math.round(rand(3, 5));
+    for (let i = 0; i < bodies; i++) {
+      this.play(pick(this.bodies), t0 + span * 0.6 * Math.random(), rand(0.14, 0.22) * k, pan + rand(-0.2, 0.2), rand(0.9, 1.1));
+    }
+    // 꾹 누르고 있는 동안 서서히 잦아드는 사각거림 (ASMR 꼬리)
+    const tail = Math.round(rand(18, 26));
+    for (let i = 0; i < tail; i++) {
+      const u = Math.pow(Math.random(), 1.8);
+      this.play(pick(this.crackles), t0 + span + 0.7 * u, rand(0.025, 0.05) * (1 - 0.7 * u) * k, pan + rand(-0.5, 0.5), rand(0.85, 1.1));
+    }
   }
 
   /** 누른 채로 문지를 때. amount = 이번 프레임 이동량(0~1 정규화) */
@@ -218,9 +300,9 @@ export class CrunchAudio {
     if (now - this.lastScrub < 0.035) return;
     this.lastScrub = now;
     const k = clamp01(amount);
-    const n = Math.max(1, Math.round(k * 14));
+    const n = Math.max(2, Math.round(k * 16));
     for (let i = 0; i < n; i++) {
-      this.grain(now + rand(0, 0.05), logRand(1000, 5000), rand(1, 3.5), logRand(0.0015, 0.008), rand(0.08, 0.32) * k, pan + rand(-0.3, 0.3));
+      this.play(pick(this.crackles), now + rand(0, 0.05), rand(0.04, 0.08) * (0.4 + 0.6 * k), pan + rand(-0.35, 0.35), rand(0.85, 1.15));
     }
   }
 
@@ -232,7 +314,7 @@ export class CrunchAudio {
     let count = Math.floor(expected) + (Math.random() < expected % 1 ? 1 : 0);
     const now = this.ctx!.currentTime;
     while (count-- > 0) {
-      this.grain(now + rand(0, dt), logRand(1500, 5000), rand(1, 3), logRand(0.0012, 0.005), rand(0.03, 0.12) * clamp01(rate * 1.5), pan + rand(-0.4, 0.4));
+      this.play(pick(this.crackles), now + rand(0, dt), rand(0.02, 0.05) * clamp01(rate * 1.5), pan + rand(-0.45, 0.45), rand(0.9, 1.1));
     }
   }
 
@@ -241,7 +323,7 @@ export class CrunchAudio {
     if (!this.ready) return;
     const k = clamp01(depth);
     if (k < 0.05) return;
-    this.thump(this.ctx!.currentTime + 0.01, 0.07 * k, 300, 1100, 0.28);
+    this.thump(this.ctx!.currentTime + 0.01, 0.05 * k, 220, 700, 0.3);
   }
 
   dispose() {
