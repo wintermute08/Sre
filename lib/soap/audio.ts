@@ -14,12 +14,23 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 type AudioCtor = typeof AudioContext;
 
 /** public/audio/clips.json (scripts/prepare-audio.py 가 만든다) */
-type ClipInfo = { id: string; group: string; file: string; onset: number; peak: number; duration: number; gain: number };
+type ClipInfo = {
+  id: string;
+  group: string;
+  file: string;
+  onset: number;
+  peak: number;
+  duration: number;
+  gain: number;
+  grains: [number, number][]; // 녹음 속 '바삭' 알갱이: [위치(초), 세기(dBFS)]
+};
 type Clip = ClipInfo & { buffer: AudioBuffer };
-type Voice = { src: AudioBufferSourceNode; gain: GainNode; endAt: number };
 
-const MAX_VOICES = 2; // 동시에 나는 녹음 소리 최대 개수
-const DEFAULT_GIVE = 0.04; // 합성음일 때 비누가 꺼지는 시점(초)
+/** 알갱이 종류: 누를 때 / 누른 채 문지를 때 / 다시 부풀 때 */
+export type GrainKind = 'press' | 'move' | 'release';
+
+const MAX_GRAINS = 28; // 동시에 울리는 알갱이 최대 개수 (휴대폰 부담 제한)
+const DEFAULT_GIVE = 0.04; // 비누가 '바삭' 꺼지는 시점(초)
 
 /** 핑크 노이즈 (Paul Kellet) */
 function pinkNoise(n: number) {
@@ -89,8 +100,8 @@ export class CrunchAudio {
 
   private clips: Clip[] = [];
   private group: string | null = null; // null = 전체에서 고름
-  private lastClip: Record<string, string> = {};
-  private voices: Voice[] = [];
+  private activeGrains = 0;
+  private lastGrain = '';
   private preloading = false;
 
   private pending: { intensity: number; pan: number; at: number } | null = null;
@@ -277,56 +288,72 @@ export class CrunchAudio {
     }
   }
 
+  private get ready() {
+    return this.enabled && this.ctx !== null && this.ctx.state === 'running';
+  }
+
   get usingSamples() {
     return this.clips.length > 0;
   }
 
-  /** 같은 그룹에서 직전 클립은 피해서 고른다 */
-  private pickClip(): Clip | null {
+  /**
+   * 녹음에서 '바삭' 알갱이 하나를 골라 그 부분만 짧게 재생한다 (원래 속도, EQ 없음).
+   * 클립을 통째로 트는 대신 이렇게 하면, 소리가 비누의 실제 움직임을 따라간다:
+   * 빨리 누르면 촘촘하게, 멈추면 조용히, 문지르면 사각사각, 놓으면 희미하게.
+   */
+  private playGrain(kind: GrainKind, when: number, loud: number, pan: number, dur?: number) {
+    if (this.activeGrains >= MAX_GRAINS) return;
     const pool = this.clips.filter((c) => !this.group || c.group === this.group);
-    const list = pool.length ? pool : this.clips;
-    if (!list.length) return null;
-    const key = this.group ?? '*';
-    const choices = list.length > 1 ? list.filter((c) => c.id !== this.lastClip[key]) : list;
-    const clip = pick(choices);
-    this.lastClip[key] = clip.id;
-    return clip;
-  }
+    const clips = (pool.length ? pool : this.clips).filter((c) => c.grains.length);
+    if (!clips.length) return;
 
-  /** 녹음 재생. 앞 무음은 건너뛰고(onset) 원래 속도(playbackRate 1)로. 반환: 첫 '바삭'까지 걸리는 시간 */
-  private playClip(intensity: number, pan: number): number | null {
-    const clip = this.pickClip();
-    if (!clip) return null;
-    const ctx = this.ctx!;
-    const now = ctx.currentTime;
-
-    // 동시 재생 제한: 가장 오래된 소리를 20ms 만에 줄이고 멈춤
-    this.voices = this.voices.filter((v) => v.endAt > now);
-    while (this.voices.length >= MAX_VOICES) {
-      const v = this.voices.shift()!;
-      v.gain.gain.setTargetAtTime(0, now, 0.006);
-      try {
-        v.src.stop(now + 0.03);
-      } catch {
-        /* 이미 멈춤 */
-      }
+    // 알갱이 고르기: 누를 땐 센 것 위주, 놓을 땐 약한 것 위주. 바로 전 알갱이는 피함.
+    const tries = kind === 'press' ? 3 : kind === 'release' ? 2 : 1;
+    let best: { clip: Clip; g: [number, number] } | null = null;
+    for (let i = 0; i < tries + 2 && (i < tries || !best); i++) {
+      const clip = pick(clips);
+      const g = pick(clip.grains);
+      if (`${clip.id}@${g[0]}` === this.lastGrain && clips.length + clip.grains.length > 2) continue;
+      if (!best) best = { clip, g };
+      else if (kind === 'press' ? g[1] > best.g[1] : kind === 'release' ? g[1] < best.g[1] : false) best = { clip, g };
     }
+    if (!best) return;
+    const { clip, g } = best;
+    this.lastGrain = `${clip.id}@${g[0]}`;
+
+    const ctx = this.ctx!;
+    const d = dur ?? (kind === 'press' ? rand(0.035, 0.06) : kind === 'move' ? rand(0.022, 0.04) : rand(0.018, 0.03));
+    // 알갱이마다 세기 차이는 남기되 절반으로 줄여 고르게 (-16dBFS 기준)
+    const level = clip.gain * Math.pow(10, ((-16 - g[1]) * 0.5) / 20);
+    const peak = Math.min(1.2, level * clamp01(loud));
+    if (peak < 0.003) return;
 
     const src = ctx.createBufferSource();
     src.buffer = clip.buffer;
     src.playbackRate.value = 1;
-    const g = ctx.createGain();
-    g.gain.value = clip.gain * (0.75 + 0.25 * clamp01(intensity));
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, when);
+    gain.gain.linearRampToValueAtTime(peak, when + 0.0012);
+    gain.gain.setTargetAtTime(0, when + d * 0.45, d * 0.22);
     const p = ctx.createStereoPanner();
-    p.pan.value = Math.max(-1, Math.min(1, pan * 0.5));
-    src.connect(g).connect(p).connect(this.sampleIn!);
-    src.start(now, clip.onset);
-    this.voices.push({ src, gain: g, endAt: now + clip.duration - clip.onset });
-    return clip.peak;
+    p.pan.value = Math.max(-1, Math.min(1, pan * 0.5 + rand(-0.12, 0.12)));
+    src.connect(gain).connect(p).connect(this.sampleIn!);
+    this.activeGrains++;
+    src.onended = () => {
+      this.activeGrains--;
+      src.disconnect();
+    };
+    src.start(when, g[0], d + 0.06);
   }
 
-  private get ready() {
-    return this.enabled && this.ctx !== null && this.ctx.state === 'running';
+  /**
+   * 엔진이 매 프레임 비누 변형량으로 계산한 알갱이 수만큼 뿌린다.
+   * n: 이번 프레임에 낼 개수, loud: 0~1 (변형 속도), spread: 이번 프레임 길이(초)에 고르게 분산
+   */
+  grains(kind: GrainKind, n: number, loud: number, pan: number, spread: number) {
+    if (!this.ready || !this.usingSamples || n <= 0) return;
+    const now = this.ctx!.currentTime;
+    for (let i = 0; i < n; i++) this.playGrain(kind, now + Math.random() * spread, loud * rand(0.7, 1), pan);
   }
 
   private makeRoom(ctx: BaseAudioContext) {
@@ -387,8 +414,9 @@ export class CrunchAudio {
       return DEFAULT_GIVE;
     }
     if (this.usingSamples) {
-      const peak = this.playClip(intensity, pan);
-      if (peak !== null) return Math.min(0.15, Math.max(0.02, peak));
+      // 닿는 순간 센 알갱이 하나를 조금 길게 — 첫 '바삭'. 이후는 변형 속도가 이어서 만든다.
+      this.playGrain('press', this.ctx!.currentTime, 0.75 + 0.25 * clamp01(intensity), pan, rand(0.07, 0.1));
+      return DEFAULT_GIVE;
     }
     this.synthPress(intensity, pan);
     return DEFAULT_GIVE;
@@ -458,7 +486,6 @@ export class CrunchAudio {
     document.removeEventListener('visibilitychange', this.onGesture);
     this.gestureBound = false;
     this.pending = null;
-    this.voices = [];
     this.clips = [];
     void this.ctx?.close();
     this.ctx = null;

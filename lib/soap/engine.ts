@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { CrunchAudio } from './audio';
+import { CrunchAudio, type GrainKind } from './audio';
 import { MAX_DENTS, createDentUniforms, createSoapMaterial, stampUniforms } from './deform';
 
 // ---------- 튜닝 값 (미터, 초) ----------
@@ -61,12 +61,17 @@ class Dent {
   held = true;
   age = 0;
   releasedAt = 0;
-  crunchAt = TUNING.crunchAt; // 소리의 첫 '바삭'에 맞춰 바뀜
+  crunchAt = TUNING.crunchAt;
+  // 소리: 지난 프레임 대비 변형량으로 알갱이를 만든다
+  prevDepth = 0;
+  prevCenter = new THREE.Vector3();
+  grainAcc = 0;
 
   constructor(public pointerId: number, local: THREE.Vector3, normal: THREE.Vector3, public pan: number) {
     this.center = local.clone();
     this.target = local.clone();
     this.start = local.clone();
+    this.prevCenter.copy(local);
     this.normal = normal.clone();
     this.targetNormal = normal.clone();
   }
@@ -582,6 +587,7 @@ export class SoapEngine {
     for (let i = this.dents.length - 1; i >= 0; i--) {
       const d = this.dents[i];
       if (!d.update(dt)) this.dents.splice(i, 1);
+      else this.soundFromDent(d, dt);
     }
     this.syncDents();
     if (this.dents.length) active = true;
@@ -642,6 +648,42 @@ export class SoapEngine {
     if (active) this.render();
     this.dirty = false;
   };
+
+  /**
+   * 비누가 실제로 변형된 만큼 소리를 낸다. (녹음 알갱이)
+   *  - 눌려 들어간 깊이만큼 '바삭' — 빨리 누를수록 크고 촘촘하게, 멈추면 조용
+   *  - 누른 채 문지른 거리만큼 '사각'
+   *  - 다시 부풀어 오르는 만큼 희미하게
+   */
+  private soundFromDent(d: Dent, dt: number) {
+    const dDepth = (d.depth - d.prevDepth) / TUNING.depth; // 이번 프레임 깊이 변화 (최대 깊이 = 1)
+    const moved = d.held ? d.center.distanceTo(d.prevCenter) : 0; // m
+    d.prevDepth = d.depth;
+    d.prevCenter.copy(d.center);
+    if (dt <= 0) return;
+
+    if (dDepth > 0 && d.held) {
+      // 끝까지 한 번 누르면 약 30알
+      d.grainAcc += dDepth * 30;
+      this.emitGrains(d, 'press', THREE.MathUtils.clamp(dDepth / dt / 10, 0.3, 1), dt);
+    } else if (dDepth < 0 && !d.held) {
+      // 다시 부풀 때 약 8알, 아주 작게
+      d.grainAcc += -dDepth * 8;
+      this.emitGrains(d, 'release', THREE.MathUtils.clamp(-dDepth / dt / 3, 0.15, 0.4), dt);
+    }
+    if (moved > 0) {
+      // 1mm 문지를 때마다 약 1알, 빠를수록 크게
+      d.grainAcc += (moved / 0.001) * 1.0;
+      this.emitGrains(d, 'move', THREE.MathUtils.clamp(moved / dt / 0.08, 0.2, 0.85), dt);
+    }
+  }
+
+  private emitGrains(d: Dent, kind: GrainKind, loud: number, dt: number) {
+    const n = Math.min(10, Math.floor(d.grainAcc));
+    if (n <= 0) return;
+    d.grainAcc -= n;
+    this.audio.grains(kind, n, loud, d.pan, Math.min(dt, 0.05));
+  }
 
   private applyMorph(name: string, w: number) {
     const i = this.morphIndex[name];
