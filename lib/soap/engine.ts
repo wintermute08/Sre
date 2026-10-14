@@ -15,10 +15,10 @@ export const TUNING = {
   radius: 0.0105,       // 손가락 자국 반경 — 좁을수록 단단한 재질처럼 보임
   stiffness: 1600,      // 누를 때 스프링 — 단단하게 바로 반응
   damping: 1.0,         // 출렁임 없음 (1보다 작으면 젤리처럼 출렁)
-  releaseDelay: 0.05,   // 손 떼고 잠깐 버티는 시간
-  recoverSlow: 1.1,     // 복원 초반 속도 — 쫀득하게 버팀
-  recoverFast: 7.0,     // 복원 후반 속도
-  recoverRamp: 0.5,     // 초반→후반 전환 시간
+  releaseDelay: 0.18,   // 손 떼고 눌린 채로 잠깐 버티는 시간
+  recoverSlow: 0.45,    // 복원 초반 속도 — 아주 천천히, 쫀득하게
+  recoverFast: 2.8,     // 복원 후반 속도
+  recoverRamp: 1.4,     // 초반→후반 전환 시간 (95% 복원까지 약 1.8초)
   tiltMax: 0.35,        // 빈 곳 드래그로 기울일 수 있는 최대 각도(rad)
 };
 
@@ -254,6 +254,9 @@ export class SoapEngine {
     canvas.addEventListener('keydown', this.onKeyDown);
     canvas.addEventListener('keyup', this.onKeyUp);
     canvas.addEventListener('webglcontextlost', this.onContextLost);
+
+    // ?debug 로 열면 콘솔에서 __soap.debugState() 로 상태 확인
+    if (new URLSearchParams(location.search).has('debug')) (window as unknown as { __soap: SoapEngine }).__soap = this;
 
     this.load();
     this.raf = requestAnimationFrame(this.frame);
@@ -513,7 +516,8 @@ export class SoapEngine {
   private frame = (now: number) => {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.frame);
-    const dt = Math.min((now - (this.last || now)) / 1000, 1 / 30);
+    // 느린 폰에서도 실제 시간대로 움직이게 0.1초까지 허용 (스프링은 내부에서 잘게 나눠 계산)
+    const dt = Math.min((now - (this.last || now)) / 1000, 0.1);
     this.last = now;
     if (!this.soap) {
       if (this.dirty) this.render();
