@@ -43,6 +43,10 @@ const HISS_PEAK = 0.55; // 합성 대체음: 가장 빨리 부풀 때 음량
 const HISS_RATE = 480; // 녹음 '샤아악': 가장 빨리 부풀 때 초당 조각 수 (촘촘할수록 매끄럽게 이어짐)
 const HISS_LOUD = 0.17; // 녹음 '샤아악': 조각 하나 크기
 
+/** iPhone·iPad (iPadOS는 Mac처럼 보여서 터치 지원으로 구분) */
+const isIOS = () =>
+  /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 const MAX_GRAINS = 48; // 동시에 울리는 알갱이 최대 개수 (휴대폰 부담 제한)
 const DEFAULT_GIVE = 0.04; // 비누가 '바삭' 꺼지는 시점(초)
 
@@ -121,13 +125,18 @@ export class CrunchAudio {
 
   private pending: { intensity: number; pan: number; at: number } | null = null;
   private gestureBound = false;
+  // 다른 앱에 다녀오면 iOS는 오디오를 '켜져 있는데 소리 안 나는' 상태로 두곤 한다 → 새로 만든다
+  private needsRevive = false;
 
   /**
    * 오디오 준비. 아무 때나 불러도 되지만 실제로 켜지는 건 '사용자 활성화' 제스처 안에서뿐이다.
    * 주의: 터치에서는 pointerdown이 활성화 제스처가 아니다(pointerup / touchend / click만 해당).
    * 그래서 첫 터치의 pointerdown에서는 꺼져 있을 수 있고, 손을 떼는 순간 켜진다.
    */
-  unlock(): boolean {
+  /** fromGesture: 손을 뗀 순간처럼 브라우저가 오디오를 허락하는 제스처 안에서 불렀는지 */
+  unlock(fromGesture = false): boolean {
+    const st = this.ctx?.state as string | undefined;
+    if (this.ctx && (this.needsRevive || st === 'interrupted' || st === 'closed')) this.revive();
     if (!this.ctx && !this.create()) return false;
     const ctx = this.ctx!;
     if (ctx.state !== 'running') {
@@ -141,9 +150,38 @@ export class CrunchAudio {
         /* 무시 */
       }
       ctx.resume().catch(() => {});
+      // 허락받은 제스처에서 켜기를 시도했는데도 안 켜지면 다음 터치 때 새로 만든다
+      if (fromGesture) window.setTimeout(() => {
+        if (this.ctx === ctx && ctx.state !== 'running' && document.visibilityState === 'visible') this.needsRevive = true;
+      }, 600);
     }
     return true;
   }
+
+  /** 오디오 장치를 새로 만든다. 받아 둔 녹음·알갱이(AudioBuffer)는 그대로 다시 쓴다. */
+  private revive() {
+    const old = this.ctx;
+    this.needsRevive = false;
+    this.ctx = null;
+    this.hisses.clear();
+    this.activeGrains = 0;
+    void old?.close().catch(() => {});
+    this.create();
+  }
+
+  /**
+   * 다른 앱·탭으로 갈 때.
+   * iPhone·iPad는 돌아오면 오디오가 '켜져 있다고 나오는데 소리가 안 나는' 상태가 되곤 해서
+   * 직접 멈춰 두고 돌아와 첫 터치에서 새로 만든다. 다른 기기는 그대로 둔다(돌아오자마자 소리 나게).
+   */
+  private onHidden = () => {
+    if (!this.ctx) return;
+    for (const id of [...this.hisses.keys()]) this.hissStop(id);
+    if (isIOS()) {
+      void this.ctx.suspend().catch(() => {});
+      this.needsRevive = true;
+    }
+  };
 
   /** 페이지 어디를 탭해도 오디오가 켜지도록 활성화 제스처에 연결 */
   bindGestures() {
@@ -153,12 +191,24 @@ export class CrunchAudio {
     for (const type of ['pointerup', 'touchend', 'click', 'keydown'] as const) {
       window.addEventListener(type, this.onGesture, opts);
     }
-    document.addEventListener('visibilitychange', this.onGesture);
+    document.addEventListener('visibilitychange', this.onVisibility);
+    window.addEventListener('pagehide', this.onHidden);
+    window.addEventListener('pageshow', this.onVisibility);
   }
 
   private onGesture = () => {
     if (document.visibilityState === 'hidden') return;
-    if (!this.ctx || this.ctx.state !== 'running') this.unlock();
+    if (!this.ctx || this.ctx.state !== 'running' || this.needsRevive) this.unlock(true);
+  };
+
+  /** 화면에서 나가고 돌아올 때 (터치가 아니므로 오디오를 새로 만들지는 않음) */
+  private onVisibility = () => {
+    if (document.visibilityState === 'hidden') {
+      this.onHidden();
+      return;
+    }
+    // iPhone이 아니면 이전에 허락받은 페이지라 바로 다시 켜질 수 있다
+    if (this.ctx && this.ctx.state !== 'running' && !this.needsRevive) this.ctx.resume().catch(() => {});
   };
 
   private create(): boolean {
@@ -172,7 +222,13 @@ export class CrunchAudio {
       ctx = new AC();
     }
     this.ctx = ctx;
+    if (!this.noise) this.bakeSynth(ctx);
+    this.wire(ctx);
+    return true;
+  }
 
+  /** 합성 재료 (처음 한 번만). AudioBuffer는 오디오 장치를 새로 만들어도 다시 쓸 수 있다. */
+  private bakeSynth(ctx: AudioContext) {
     const len = ctx.sampleRate * 2;
     this.noise = ctx.createBuffer(1, len, ctx.sampleRate);
     this.noise.getChannelData(0).set(pinkNoise(len));
@@ -188,10 +244,13 @@ export class CrunchAudio {
     for (let i = 0; i < 8; i++) {
       this.airs.push(bakeGrain(ctx, rand(700, 1800), rand(1, 1.6), rand(0.002, 0.004), rand(0.002, 0.004)));
     }
+  }
 
+  /** 소리 경로 연결 (오디오 장치를 새로 만들 때마다) */
+  private wire(ctx: AudioContext) {
     // 최종 음량
     this.out = ctx.createGain();
-    this.out.gain.value = this.enabled ? this.volume : 0;
+    this.out.gain.value = this.outGain();
     this.out.connect(ctx.destination);
 
     // 녹음 소리: EQ·잔향 없이 원음 그대로, 두 개가 겹칠 때만 넘치지 않게 리미터
@@ -240,10 +299,13 @@ export class CrunchAudio {
       if (ctx.state !== 'running' || !this.pending) return;
       const p = this.pending;
       this.pending = null;
-      // 꾹 누르고 있다가 떼는 경우도 있으니 넉넉히 기다린다
-      if (performance.now() - p.at < 4000) this.press(p.intensity * 0.8, p.pan);
+      // 꾹 누르고 있다가 떼는 경우도 있으니 넉넉히 기다린다.
+      // 누르는 동안 못 낸 바삭을 짧게 몰아서 (센 알갱이 하나 + 10알 남짓)
+      if (performance.now() - p.at < 4000) {
+        this.press(p.intensity * 0.85, p.pan);
+        this.grains('press', 10, 0.75, p.pan, 0.12);
+      }
     });
-    return true;
   }
 
   setEnabled(on: boolean) {
@@ -257,12 +319,13 @@ export class CrunchAudio {
     this.applyVolume();
   }
 
+  /** 귀는 로그로 느끼므로 제곱 곡선 */
+  private outGain() {
+    return this.enabled ? this.volume * this.volume * 1.6 : 0;
+  }
+
   private applyVolume() {
-    if (this.ctx && this.out) {
-      // 귀는 로그로 느끼므로 제곱 곡선
-      const g = this.enabled ? this.volume * this.volume * 1.6 : 0;
-      this.out.gain.setTargetAtTime(g, this.ctx.currentTime, 0.02);
-    }
+    if (this.ctx && this.out) this.out.gain.setTargetAtTime(this.outGain(), this.ctx.currentTime, 0.02);
   }
 
   /** 비누 색에 맞는 녹음 그룹. null이면 전체에서 고른다. */
@@ -573,7 +636,9 @@ export class CrunchAudio {
     for (const type of ['pointerup', 'touchend', 'click', 'keydown'] as const) {
       window.removeEventListener(type, this.onGesture, true);
     }
-    document.removeEventListener('visibilitychange', this.onGesture);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    window.removeEventListener('pagehide', this.onHidden);
+    window.removeEventListener('pageshow', this.onVisibility);
     this.gestureBound = false;
     this.pending = null;
     this.clips = [];

@@ -540,7 +540,7 @@ export class SoapEngine {
 
   private onUp = (e: PointerEvent) => {
     // 터치에서는 손을 뗄 때가 오디오를 켤 수 있는 순간
-    if (e.type === 'pointerup') this.audio.unlock();
+    if (e.type === 'pointerup') this.audio.unlock(true);
     const p = this.pointers.get(e.pointerId);
     if (!p) return;
     this.pointers.delete(e.pointerId);
