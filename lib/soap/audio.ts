@@ -26,15 +26,24 @@ type ClipInfo = {
 };
 type Clip = ClipInfo & { buffer: AudioBuffer };
 
-/** 알갱이 종류: 누를 때 / 누른 채 문지를 때 */
-export type GrainKind = 'press' | 'move';
+/** 알갱이 종류: 누를 때 / 누른 채 문지를 때 / 놓은 뒤 부풀 때(아주 작고 촘촘하게) */
+export type GrainKind = 'press' | 'move' | 'hiss';
 
-/** 놓은 뒤 다시 부풀며 나는 '샤아아악' 한 줄기 */
-type Hiss = { src: AudioBufferSourceNode; band: BiquadFilterNode; level: GainNode; nodes: AudioNode[] };
+/**
+ * 놓은 뒤 다시 부풀며 나는 '샤아아악'.
+ * 녹음이 있으면: 같은 녹음의 가장 약한 바삭 조각을 초당 수백 개 겹쳐 이어진 소리로 만든다
+ *   (거품 속 작은 기포들이 촘촘히 터지는 소리 — 파삭과 같은 재료라 한 물건 소리처럼 이어짐).
+ * 녹음이 없으면: 부드러운 핑크 노이즈로 대체.
+ */
+type SynthHiss = { kind: 'synth'; src: AudioBufferSourceNode; band: BiquadFilterNode; level: GainNode; nodes: AudioNode[] };
+type GrainHiss = { kind: 'grain'; pan: number; acc: number };
+type Hiss = SynthHiss | GrainHiss;
 const MAX_HISS = 3;
-const HISS_PEAK = 0.55; // 가장 빨리 부풀 때 음량 (크런치보다 한참 작게)
+const HISS_PEAK = 0.55; // 합성 대체음: 가장 빨리 부풀 때 음량
+const HISS_RATE = 480; // 녹음 '샤아악': 가장 빨리 부풀 때 초당 조각 수 (촘촘할수록 매끄럽게 이어짐)
+const HISS_LOUD = 0.17; // 녹음 '샤아악': 조각 하나 크기
 
-const MAX_GRAINS = 28; // 동시에 울리는 알갱이 최대 개수 (휴대폰 부담 제한)
+const MAX_GRAINS = 48; // 동시에 울리는 알갱이 최대 개수 (휴대폰 부담 제한)
 const DEFAULT_GIVE = 0.04; // 비누가 '바삭' 꺼지는 시점(초)
 
 /** 핑크 노이즈 (Paul Kellet) */
@@ -314,21 +323,24 @@ export class CrunchAudio {
     if (!clips.length) return;
 
     // 알갱이 고르기: 누를 땐 센 것 위주. 바로 전 알갱이는 피함.
-    const tries = kind === 'press' ? 3 : 1;
+    const tries = kind === 'press' ? 3 : kind === 'hiss' ? 3 : 1;
     let best: { clip: Clip; g: [number, number] } | null = null;
     for (let i = 0; i < tries + 2 && (i < tries || !best); i++) {
       const clip = pick(clips);
       const g = pick(clip.grains);
       if (`${clip.id}@${g[0]}` === this.lastGrain && clips.length + clip.grains.length > 2) continue;
       if (!best) best = { clip, g };
-      else if (kind === 'press' && g[1] > best.g[1]) best = { clip, g };
+      else if (kind === 'press' ? g[1] > best.g[1] : kind === 'hiss' && g[1] < best.g[1]) best = { clip, g };
     }
     if (!best) return;
     const { clip, g } = best;
     this.lastGrain = `${clip.id}@${g[0]}`;
 
     const ctx = this.ctx!;
-    const d = dur ?? (kind === 'press' ? rand(0.035, 0.06) : rand(0.022, 0.04));
+    const d = dur ?? (kind === 'press' ? rand(0.035, 0.06) : kind === 'hiss' ? rand(0.035, 0.055) : rand(0.022, 0.04));
+    // '샤아악' 조각은 시작을 둥글게(5ms) 하고 바삭 순간보다 살짝 뒤의 결을 쓴다 → 하나하나 안 들리고 이어짐
+    const attack = kind === 'hiss' ? 0.01 : 0.0012;
+    const offset = kind === 'hiss' ? g[0] + rand(0.002, 0.014) : g[0];
     // 알갱이마다 세기 차이는 남기되 절반으로 줄여 고르게 (-16dBFS 기준)
     const level = clip.gain * Math.pow(10, ((-16 - g[1]) * 0.5) / 20);
     const peak = Math.min(1.2, level * clamp01(loud));
@@ -339,7 +351,7 @@ export class CrunchAudio {
     src.playbackRate.value = 1;
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(0, when);
-    gain.gain.linearRampToValueAtTime(peak, when + 0.0012);
+    gain.gain.linearRampToValueAtTime(peak, when + attack);
     gain.gain.setTargetAtTime(0, when + d * 0.45, d * 0.22);
     const p = ctx.createStereoPanner();
     p.pan.value = Math.max(-1, Math.min(1, pan * 0.5 + rand(-0.12, 0.12)));
@@ -349,7 +361,7 @@ export class CrunchAudio {
       this.activeGrains--;
       src.disconnect();
     };
-    src.start(when, g[0], d + 0.06);
+    src.start(when, offset, d + 0.06);
   }
 
   /**
@@ -479,6 +491,10 @@ export class CrunchAudio {
   hissStart(id: number, pan = 0) {
     if (!this.ready || !this.noise || this.hisses.has(id)) return;
     if (this.hisses.size >= MAX_HISS) this.hissStop(this.hisses.keys().next().value!);
+    if (this.usingSamples) {
+      this.hisses.set(id, { kind: 'grain', pan, acc: 0 });
+      return;
+    }
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
     src.buffer = this.noise;
@@ -512,17 +528,26 @@ export class CrunchAudio {
     }
     const p = ctx.createStereoPanner();
     p.pan.value = Math.max(-1, Math.min(1, pan * 0.5));
-    src.connect(hp).connect(band).connect(lp).connect(level).connect(tex).connect(p).connect(this.out!);
+    src.connect(hp).connect(band).connect(lp).connect(level).connect(tex).connect(p).connect(this.sampleIn!);
     src.start(0, rand(0, 1.8));
-    this.hisses.set(id, { src, band, level, nodes: [hp, lp, tex, p, ...lfos] });
+    this.hisses.set(id, { kind: 'synth', src, band, level, nodes: [hp, lp, tex, p, ...lfos] });
   }
 
-  /** level 0~1: 지금 부푸는 속도 */
-  hissLevel(id: number, level: number) {
+  /** 매 프레임. level 0~1: 지금 부푸는 정도, dt: 프레임 길이(초) */
+  hissLevel(id: number, level: number, dt: number) {
     const h = this.hisses.get(id);
     if (!h || !this.ctx) return;
     const now = this.ctx.currentTime;
     const l = clamp01(level);
+    if (h.kind === 'grain') {
+      h.acc += HISS_RATE * l * dt;
+      const n = Math.min(32, Math.floor(h.acc));
+      h.acc -= n;
+      for (let i = 0; i < n; i++) {
+        this.playGrain('hiss', now + Math.random() * Math.min(dt, 0.05), HISS_LOUD * (0.35 + 0.65 * l) * rand(0.85, 1), h.pan);
+      }
+      return;
+    }
     h.level.gain.setTargetAtTime(HISS_PEAK * Math.pow(l, 1.3), now, 0.03);
     // 빨리 부풀수록 살짝 밝게, 잦아들수록 낮게
     h.band.frequency.setTargetAtTime(1100 + 1400 * l, now, 0.05);
@@ -532,6 +557,7 @@ export class CrunchAudio {
     const h = this.hisses.get(id);
     if (!h || !this.ctx) return;
     this.hisses.delete(id);
+    if (h.kind === 'grain') return; // 이미 뿌린 조각은 스스로 끝남
     const now = this.ctx.currentTime;
     h.level.gain.setTargetAtTime(0, now, 0.04);
     h.src.stop(now + 0.25);

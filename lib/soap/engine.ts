@@ -674,9 +674,13 @@ export class SoapEngine {
       d.grainAcc += dDepth * 30;
       this.emitGrains(d, 'press', THREE.MathUtils.clamp(dDepth / dt / 10, 0.3, 1), dt);
     } else if (!d.held) {
-      // 다시 부풀 때 '샤아아악' — 부푸는 속도(최대 약 0.87 깊이/초)에 맞춰 크기를 바꾼다
+      // 다시 부풀 때 '샤아아악' — 부푸는 속도(최대 약 0.87 깊이/초)에 맞춰 크기를 바꾼다.
+      // 손을 뗀 바로 그 순간부터 작게 이어서, 파삭과 샤아악 사이에 공백이 없게 한다.
       const speed = Math.max(0, -dDepth) / dt;
-      this.audio.hissLevel(d.id, (speed / 0.87) * Math.min(1, d.releaseDepth / TUNING.depth));
+      const sinceRelease = d.age - d.releasedAt;
+      const bridge = 0.5 * Math.exp(-sinceRelease / 0.22);
+      const level = Math.max(speed / 0.87, bridge) * Math.min(1, d.releaseDepth / TUNING.depth);
+      this.audio.hissLevel(d.id, level, dt);
     }
     if (moved > 0) {
       // 1mm 문지를 때마다 약 1알, 빠를수록 크게
