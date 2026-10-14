@@ -184,7 +184,7 @@ export class CrunchAudio {
       const p = this.pending;
       this.pending = null;
       // 꾹 누르고 있다가 떼는 경우도 있으니 넉넉히 기다린다
-      if (performance.now() - p.at < 4000) this.press(p.intensity * 0.8, p.pan, 0);
+      if (performance.now() - p.at < 4000) this.press(p.intensity * 0.8, p.pan);
     });
     return true;
   }
@@ -247,12 +247,8 @@ export class CrunchAudio {
     src.start(t, rand(0, 1.5), dur + 0.02);
   }
 
-  /** 누르는 순간의 메인 크런치. intensity 0~1 */
-  /**
-   * giveAt: 손가락이 단단한 표면을 버티다 '바삭' 하고 꺼지는 시점(초).
-   * 그 전까지는 희미하게 버티는 소리, 그 순간에 메인 크런치.
-   */
-  press(intensity: number, pan = 0, giveAt = 0) {
+  /** 누르는 순간의 메인 크런치. intensity 0~1. 지연 없이 바로 낸다. */
+  press(intensity: number, pan = 0) {
     if (!this.enabled) return;
     if (!this.ready) {
       this.pending = { intensity, pan, at: performance.now() };
@@ -261,7 +257,7 @@ export class CrunchAudio {
     const now = this.ctx!.currentTime + 0.004;
     const k = Math.max(0.25, clamp01(intensity));
 
-    const t0 = now + giveAt;
+    const t0 = now;
     this.thump(t0, 0.32 * k);
 
     // 메인: 작고 고른 알갱이를 촘촘하게 (크게 튀는 알갱이 없음)

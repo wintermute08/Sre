@@ -10,7 +10,7 @@ export const TUNING = {
   depth: 0.0065,        // 최종 눌림 깊이 (두께 28mm의 약 23%)
   holdExtra: 0.1,       // 1.2초 이상 꾹 누르면 추가로 더 들어가는 비율 (조금만)
   firmStage: 0.45,      // 바삭하기 전 단단하게 버티는 깊이 비율
-  crunchAt: 0.1,        // 이 시간(초) 뒤 '바삭' 하며 꺼짐 — 크런치 소리 피크와 맞춤
+  crunchAt: 0.04,       // 이 시간(초) 뒤 '바삭' 하며 꺼짐 — 소리(즉시)와 어긋나지 않게 짧게
   holdTime: 1.2,
   radius: 0.0105,       // 손가락 자국 반경 — 좁을수록 단단한 재질처럼 보임
   stiffness: 1600,      // 누를 때 스프링 — 단단하게 바로 반응
@@ -430,8 +430,8 @@ export class SoapEngine {
     this.dents.push(dent);
     while (this.dents.length > MAX_DENTS) this.dents.shift();
     this.pointers.set(id, { mode: 'press', dent, last: local.clone() });
-    // 꺼지는 순간보다 살짝 앞서 소리를 낸다 (휴대폰 오디오 지연 보정)
-    this.audio.press(intensity, pan, Math.max(0, TUNING.crunchAt - 0.02));
+    // 소리는 닿는 즉시 낸다. 50ms만 늦어도 손과 귀가 어긋나게 느껴진다.
+    this.audio.press(intensity, pan);
     if (this.haptics) navigator.vibrate?.([12, 16, 8, 20, 5]);
     this.events.onPress?.();
     this.dirty = true;
