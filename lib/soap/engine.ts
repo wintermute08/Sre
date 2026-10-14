@@ -1,0 +1,567 @@
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { CrunchAudio } from './audio';
+import { MAX_DENTS, createDentUniforms, createSoapMaterial } from './deform';
+
+// ---------- 튜닝 값 (미터, 초) ----------
+export const TUNING = {
+  depth: 0.0085,        // 기본 눌림 깊이 (두께 28mm의 약 30%)
+  holdExtra: 0.3,       // 1.2초 이상 꾹 누르면 추가로 더 들어가는 비율
+  holdTime: 1.2,
+  radius: 0.013,        // 손가락 자국 반경
+  stiffness: 520,       // 누를 때 스프링 — 약 0.15초에 '푹'
+  damping: 0.8,         // 1보다 작으면 바닥에서 살짝 출렁
+  releaseDelay: 0.05,   // 손 떼고 잠깐 버티는 시간
+  recoverSlow: 1.1,     // 복원 초반 속도 — 쫀득하게 버팀
+  recoverFast: 7.0,     // 복원 후반 속도
+  recoverRamp: 0.5,     // 초반→후반 전환 시간
+  tiltMax: 0.35,        // 빈 곳 드래그로 기울일 수 있는 최대 각도(rad)
+};
+
+export const SOAP_TINTS = {
+  ivory: '#e8ecdf',
+  peach: '#f6d5c4',
+  pink: '#f4c9d3',
+  mint: '#cbe7da',
+  lavender: '#dcd3f0',
+} as const;
+export type SoapTint = keyof typeof SOAP_TINTS;
+
+export type EngineEvents = {
+  onProgress?: (ratio: number) => void;
+  onReady?: () => void;
+  onError?: (message: string) => void;
+  onPress?: () => void;
+};
+
+const ease = (rate: number, dt: number) => 1 - Math.exp(-rate * dt);
+
+class Dent {
+  center: THREE.Vector3;
+  target: THREE.Vector3;
+  normal: THREE.Vector3;
+  targetNormal: THREE.Vector3;
+  start: THREE.Vector3;
+  radius = TUNING.radius;
+  depth = 0;
+  vel = 0;
+  held = true;
+  age = 0;
+  releasedAt = 0;
+  rate = 0; // 깊이 변화 속도 (소리용)
+
+  constructor(public pointerId: number, local: THREE.Vector3, normal: THREE.Vector3, public pan: number) {
+    this.center = local.clone();
+    this.target = local.clone();
+    this.start = local.clone();
+    this.normal = normal.clone();
+    this.targetNormal = normal.clone();
+  }
+
+  update(dt: number): boolean {
+    this.age += dt;
+    const before = this.depth;
+    if (this.held) {
+      this.center.lerp(this.target, ease(30, dt));
+      this.normal.lerp(this.targetNormal, ease(20, dt)).normalize();
+      const hold = Math.min(this.age / TUNING.holdTime, 1);
+      const goal = TUNING.depth * (1 + TUNING.holdExtra * hold * hold);
+      const k = TUNING.stiffness;
+      const c = 2 * Math.sqrt(k) * TUNING.damping;
+      this.vel += (k * (goal - this.depth) - c * this.vel) * dt;
+      this.depth += this.vel * dt;
+    } else {
+      const t = this.age - this.releasedAt - TUNING.releaseDelay;
+      if (t > 0) {
+        const s = THREE.MathUtils.smoothstep(t, 0, TUNING.recoverRamp);
+        const rate = THREE.MathUtils.lerp(TUNING.recoverSlow, TUNING.recoverFast, s);
+        this.depth *= Math.exp(-rate * dt);
+        // 차오르면서 자국이 살짝 넓고 얕게 퍼짐
+        this.radius += (TUNING.radius * 1.35 - this.radius) * ease(2, dt);
+      }
+    }
+    this.rate = Math.abs(this.depth - before) / Math.max(dt, 1e-4) / (TUNING.depth * 8);
+    return this.held || this.depth > TUNING.depth * 0.01;
+  }
+
+  release() {
+    this.held = false;
+    this.releasedAt = this.age;
+    this.vel = 0;
+  }
+}
+
+type PointerState =
+  | { mode: 'press'; dent: Dent; last: THREE.Vector3 }
+  | { mode: 'tilt'; x: number; y: number };
+
+/** GLB를 미터 단위 float 지오메트리로 굽는다 (meshopt 양자화 노드 스케일 제거) */
+function bakeMesh(mesh: THREE.Mesh) {
+  mesh.updateWorldMatrix(true, false);
+  const m = mesh.matrixWorld.clone();
+  const normalMat = new THREE.Matrix3().getNormalMatrix(m);
+  const linear = new THREE.Matrix3().setFromMatrix4(m);
+  const src = mesh.geometry;
+
+  const toFloat = (attr: THREE.BufferAttribute | THREE.InterleavedBufferAttribute) => {
+    const s = attr.itemSize;
+    const arr = new Float32Array(attr.count * s);
+    for (let i = 0; i < attr.count; i++) {
+      arr[i * s] = attr.getX(i);
+      if (s > 1) arr[i * s + 1] = attr.getY(i);
+      if (s > 2) arr[i * s + 2] = attr.getZ(i);
+      if (s > 3) arr[i * s + 3] = attr.getW(i);
+    }
+    return new THREE.BufferAttribute(arr, s);
+  };
+
+  const g = new THREE.BufferGeometry();
+  g.setIndex(src.index);
+  const pos = toFloat(src.attributes.position);
+  pos.applyMatrix4(m);
+  g.setAttribute('position', pos);
+  const nrm = toFloat(src.attributes.normal);
+  nrm.applyNormalMatrix(normalMat);
+  g.setAttribute('normal', nrm);
+  if (src.attributes.uv) g.setAttribute('uv', toFloat(src.attributes.uv));
+
+  g.morphTargetsRelative = src.morphTargetsRelative;
+  if (src.morphAttributes.position) {
+    g.morphAttributes.position = src.morphAttributes.position.map((a) => {
+      const f = toFloat(a);
+      if (src.morphTargetsRelative) f.applyMatrix3(linear);
+      else f.applyMatrix4(m);
+      return f;
+    });
+  }
+  if (src.morphAttributes.normal) {
+    g.morphAttributes.normal = src.morphAttributes.normal.map((a) => {
+      const f = toFloat(a);
+      f.applyMatrix3(normalMat);
+      return f;
+    });
+  }
+  g.computeBoundingBox();
+  g.computeBoundingSphere();
+  return g;
+}
+
+export class SoapEngine {
+  private renderer: THREE.WebGLRenderer;
+  private scene = new THREE.Scene();
+  private camera = new THREE.PerspectiveCamera(30, 1, 0.01, 10);
+  private soapGroup = new THREE.Group();
+  private soap: THREE.Mesh | null = null;
+  private proxy: THREE.Mesh | null = null;
+  private material: THREE.MeshPhysicalMaterial | null = null;
+  private shadow: THREE.Mesh;
+  private uniforms = createDentUniforms();
+  private dents: Dent[] = [];
+  private pointers = new Map<number, PointerState>();
+  private raycaster = new THREE.Raycaster();
+  private ndc = new THREE.Vector2();
+  private tilt = { x: 0, y: 0, vx: 0, vy: 0 };
+  private morph = { squeeze: 0, pullL: 0, pullR: 0 };
+  private morphIndex: Record<string, number> = {};
+  private audio = new CrunchAudio();
+  private haptics = true;
+  private raf = 0;
+  private last = 0;
+  private dirty = true;
+  private disposed = false;
+  private resizeObserver: ResizeObserver;
+  private size = { w: 1, h: 1 };
+  private tintTarget = new THREE.Color(SOAP_TINTS.ivory);
+  private baseColor: THREE.Color | null = null;
+
+  constructor(private canvas: HTMLCanvasElement, private events: EngineEvents = {}) {
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.toneMapping = THREE.NeutralToneMapping;
+    this.renderer.toneMappingExposure = 1.2;
+
+    // 약한 환경광 + 옆에서 부드러운 키 라이트 (정면 강한 빛은 비누를 흰 덩어리로 만듦)
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.3;
+    pmrem.dispose();
+
+    const key = new THREE.DirectionalLight('#fff1dc', 3.4);
+    key.position.set(-0.75, 0.42, 0.2);
+    this.scene.add(key);
+    const fill = new THREE.DirectionalLight('#e3f6ff', 0.45);
+    fill.position.set(0.7, 0.35, 0.4);
+    this.scene.add(fill);
+    const rim = new THREE.DirectionalLight('#ffffff', 0.5);
+    rim.position.set(0.1, 0.3, -0.8);
+    this.scene.add(rim);
+
+    this.shadow = this.makeShadow();
+    this.scene.add(this.shadow);
+    this.scene.add(this.soapGroup);
+
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(canvas);
+    this.resize();
+
+    canvas.addEventListener('pointerdown', this.onDown);
+    canvas.addEventListener('pointermove', this.onMove);
+    canvas.addEventListener('pointerup', this.onUp);
+    canvas.addEventListener('pointercancel', this.onUp);
+    canvas.addEventListener('lostpointercapture', this.onUp);
+    canvas.addEventListener('contextmenu', this.prevent);
+    canvas.addEventListener('keydown', this.onKeyDown);
+    canvas.addEventListener('keyup', this.onKeyUp);
+    canvas.addEventListener('webglcontextlost', this.onContextLost);
+
+    this.load();
+    this.raf = requestAnimationFrame(this.frame);
+  }
+
+  // ---------- 공개 API ----------
+  setSound(on: boolean) {
+    this.audio.setEnabled(on);
+  }
+
+  setHaptics(on: boolean) {
+    this.haptics = on;
+  }
+
+  setTint(tint: SoapTint) {
+    // 아이보리는 Blender 원본 재질 색을 그대로 쓴다
+    if (tint === 'ivory' && this.baseColor) this.tintTarget.copy(this.baseColor);
+    else this.tintTarget.set(SOAP_TINTS[tint]);
+    this.dirty = true;
+  }
+
+  dispose() {
+    this.disposed = true;
+    cancelAnimationFrame(this.raf);
+    this.resizeObserver.disconnect();
+    const c = this.canvas;
+    c.removeEventListener('pointerdown', this.onDown);
+    c.removeEventListener('pointermove', this.onMove);
+    c.removeEventListener('pointerup', this.onUp);
+    c.removeEventListener('pointercancel', this.onUp);
+    c.removeEventListener('lostpointercapture', this.onUp);
+    c.removeEventListener('contextmenu', this.prevent);
+    c.removeEventListener('keydown', this.onKeyDown);
+    c.removeEventListener('keyup', this.onKeyUp);
+    c.removeEventListener('webglcontextlost', this.onContextLost);
+    this.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.geometry.dispose();
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach((mm) => mm.dispose());
+      }
+    });
+    this.scene.environment?.dispose();
+    this.renderer.dispose();
+    this.audio.dispose();
+  }
+
+  // ---------- 로드 ----------
+  private load() {
+    const loader = new GLTFLoader();
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    loader.load(
+      '/models/slang_soap.glb',
+      (gltf) => {
+        if (this.disposed) return;
+        let found: THREE.Mesh | null = null;
+        gltf.scene.traverse((o) => {
+          if (!found && (o as THREE.Mesh).isMesh) found = o as THREE.Mesh;
+        });
+        if (!found) {
+          this.events.onError?.('비누 모델을 찾지 못했어요');
+          return;
+        }
+        const src: THREE.Mesh = found;
+        const geometry = bakeMesh(src);
+        const material = createSoapMaterial(src.material as THREE.MeshStandardMaterial, this.uniforms);
+        this.baseColor = material.color.clone();
+        if (this.tintTarget.equals(new THREE.Color(SOAP_TINTS.ivory))) this.tintTarget.copy(this.baseColor);
+        this.material = material;
+
+        const soap = new THREE.Mesh(geometry, material);
+        soap.frustumCulled = false;
+        soap.morphTargetDictionary = { ...(src.morphTargetDictionary ?? {}) };
+        soap.morphTargetInfluences = (src.morphTargetInfluences ?? []).map(() => 0);
+        this.morphIndex = soap.morphTargetDictionary;
+        this.soap = soap;
+        this.soapGroup.add(soap);
+
+        // 레이캐스트용: 모프 없는 같은 지오메트리 (CPU 모프 계산 피함)
+        const pg = new THREE.BufferGeometry();
+        pg.setIndex(geometry.index);
+        pg.setAttribute('position', geometry.attributes.position);
+        pg.setAttribute('normal', geometry.attributes.normal);
+        pg.computeBoundingSphere();
+        pg.computeBoundingBox();
+        this.proxy = new THREE.Mesh(pg, new THREE.MeshBasicMaterial());
+        this.proxy.visible = false;
+        this.soapGroup.add(this.proxy);
+
+        src.geometry.dispose();
+        (src.material as THREE.Material).dispose();
+
+        // 첫 프레임에서 셰이더 컴파일 끊김 방지
+        this.renderer.compile(this.scene, this.camera);
+        this.dirty = true;
+        this.events.onReady?.();
+      },
+      (e) => {
+        if (e.total) this.events.onProgress?.(e.loaded / e.total);
+      },
+      () => this.events.onError?.('비누를 불러오지 못했어요. 네트워크를 확인하고 새로고침해 주세요.'),
+    );
+  }
+
+  private makeShadow() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d')!;
+    const grd = g.createRadialGradient(64, 64, 4, 64, 64, 64);
+    grd.addColorStop(0, 'rgba(25,31,40,0.42)');
+    grd.addColorStop(0.5, 'rgba(25,31,40,0.16)');
+    grd.addColorStop(1, 'rgba(25,31,40,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 128, 128);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.104 * 1.45, 0.066 * 1.6),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }),
+    );
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = -0.0155;
+    return mesh;
+  }
+
+  // ---------- 화면 크기 ----------
+  private resize() {
+    const w = this.canvas.clientWidth || 1;
+    const h = this.canvas.clientHeight || 1;
+    if (w === this.size.w && h === this.size.h) return;
+    this.size = { w, h };
+    this.renderer.setSize(w, h, false);
+    const cam = this.camera;
+    cam.aspect = w / h;
+    const tan = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
+    // 세로 화면 기준: 비누 가로가 화면 폭의 ~78%를 채우도록
+    const dW = (0.104 / 0.78) / (2 * tan * cam.aspect);
+    const dH = (0.066 * 1.9) / (2 * tan);
+    const dist = Math.max(dW, dH);
+    const dir = new THREE.Vector3(0, 0.86, 0.5).normalize();
+    cam.position.copy(dir.multiplyScalar(dist));
+    cam.lookAt(0, -0.002, 0);
+    cam.updateProjectionMatrix();
+    this.dirty = true;
+  }
+
+  // ---------- 입력 ----------
+  private prevent = (e: Event) => e.preventDefault();
+
+  private hit(clientX: number, clientY: number) {
+    if (!this.proxy) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    this.ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.ndc, this.camera);
+    const h = this.raycaster.intersectObject(this.proxy, false)[0];
+    if (!h) return null;
+    const local = this.soapGroup.worldToLocal(h.point.clone());
+    const normal = (h.normal ?? h.face?.normal ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
+    return { local, normal };
+  }
+
+  private panOf(clientX: number) {
+    const rect = this.canvas.getBoundingClientRect();
+    return THREE.MathUtils.clamp(((clientX - rect.left) / rect.width) * 2 - 1, -1, 1) * 0.6;
+  }
+
+  private startDent(id: number, local: THREE.Vector3, normal: THREE.Vector3, pan: number, intensity: number) {
+    this.audio.unlock();
+    const dent = new Dent(id, local, normal, pan);
+    this.dents.push(dent);
+    while (this.dents.length > MAX_DENTS) this.dents.shift();
+    this.pointers.set(id, { mode: 'press', dent, last: local.clone() });
+    this.audio.press(intensity, pan);
+    if (this.haptics) navigator.vibrate?.([12, 16, 8, 20, 5]);
+    this.events.onPress?.();
+    this.dirty = true;
+    return dent;
+  }
+
+  private onDown = (e: PointerEvent) => {
+    e.preventDefault();
+    this.audio.unlock();
+    this.canvas.setPointerCapture?.(e.pointerId);
+    const h = this.hit(e.clientX, e.clientY);
+    if (h) {
+      // 터치 화면의 pressure는 힘이 아님 — 펜일 때만 보조 입력으로 사용
+      const intensity = e.pointerType === 'pen' && e.pressure > 0 ? 0.45 + e.pressure * 0.6 : 0.85 + Math.random() * 0.15;
+      this.startDent(e.pointerId, h.local, h.normal, this.panOf(e.clientX), intensity);
+    } else {
+      this.pointers.set(e.pointerId, { mode: 'tilt', x: e.clientX, y: e.clientY });
+    }
+  };
+
+  private onMove = (e: PointerEvent) => {
+    const p = this.pointers.get(e.pointerId);
+    if (!p) return;
+    if (p.mode === 'tilt') {
+      const dx = e.clientX - p.x;
+      const dy = e.clientY - p.y;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      this.tilt.vy += dx * 0.004;
+      this.tilt.vx += dy * 0.003;
+      this.dirty = true;
+      return;
+    }
+    const h = this.hit(e.clientX, e.clientY);
+    if (!h) return;
+    p.dent.target.copy(h.local);
+    p.dent.targetNormal.copy(h.normal);
+    p.dent.pan = this.panOf(e.clientX);
+    const moved = h.local.distanceTo(p.last);
+    p.last.copy(h.local);
+    // 5mm 이동 ≈ 최대 사각거림
+    this.audio.scrub(moved / 0.005, p.dent.pan);
+  };
+
+  private onUp = (e: PointerEvent) => {
+    const p = this.pointers.get(e.pointerId);
+    if (!p) return;
+    this.pointers.delete(e.pointerId);
+    if (p.mode === 'press') {
+      this.audio.release(p.dent.depth / TUNING.depth);
+      p.dent.release();
+    }
+  };
+
+  private keyHeld = false;
+  private onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== ' ' && e.key !== 'Enter') return;
+    e.preventDefault();
+    if (this.keyHeld || !this.soap) return;
+    this.keyHeld = true;
+    const top = this.soap.geometry.boundingBox!.max.y;
+    this.startDent(-1, new THREE.Vector3(0, top, 0), new THREE.Vector3(0, 1, 0), 0, 0.9);
+  };
+
+  private onKeyUp = (e: KeyboardEvent) => {
+    if (e.key !== ' ' && e.key !== 'Enter') return;
+    this.keyHeld = false;
+    this.onUp({ pointerId: -1 } as PointerEvent);
+  };
+
+  private onContextLost = (e: Event) => {
+    e.preventDefault();
+    this.events.onError?.('화면을 다시 그릴 수 없어요. 새로고침해 주세요.');
+  };
+
+  // ---------- 루프 ----------
+  private frame = (now: number) => {
+    if (this.disposed) return;
+    this.raf = requestAnimationFrame(this.frame);
+    const dt = Math.min((now - (this.last || now)) / 1000, 1 / 30);
+    this.last = now;
+    if (!this.soap) {
+      if (this.dirty) this.render();
+      return;
+    }
+
+    let active = this.dirty;
+
+    // 눌림
+    for (let i = this.dents.length - 1; i >= 0; i--) {
+      const d = this.dents[i];
+      if (!d.update(dt)) this.dents.splice(i, 1);
+      else this.audio.settle(d.held ? 0 : d.rate, dt, d.pan);
+    }
+    this.syncDents();
+    if (this.dents.length) active = true;
+
+    // 모프: 두 손가락 이상 → Squeeze, 누른 채 좌우로 끌기 → Pull
+    const held = this.dents.filter((d) => d.held);
+    let pull = 0;
+    for (const d of held) pull += d.center.x - d.start.x;
+    const targets = {
+      squeeze: held.length >= 2 ? 0.75 : 0,
+      pullL: THREE.MathUtils.clamp(-pull / 0.03, 0, 1) * 0.7,
+      pullR: THREE.MathUtils.clamp(pull / 0.03, 0, 1) * 0.7,
+    };
+    for (const k of ['squeeze', 'pullL', 'pullR'] as const) {
+      const rising = targets[k] > this.morph[k];
+      this.morph[k] += (targets[k] - this.morph[k]) * ease(rising ? 9 : 3.2, dt);
+      if (Math.abs(this.morph[k] - targets[k]) > 1e-4) active = true;
+    }
+    this.applyMorph('Squeeze', this.morph.squeeze);
+    this.applyMorph('Pull_Left', this.morph.pullL);
+    this.applyMorph('Pull_Right', this.morph.pullR);
+
+    // 기울이기: 손 떼면 제자리로 스프링 복귀
+    const tilting = [...this.pointers.values()].some((p) => p.mode === 'tilt');
+    const t = this.tilt;
+    t.x = THREE.MathUtils.clamp(t.x + t.vx, -TUNING.tiltMax, TUNING.tiltMax);
+    t.y = THREE.MathUtils.clamp(t.y + t.vy, -TUNING.tiltMax * 1.5, TUNING.tiltMax * 1.5);
+    t.vx = 0;
+    t.vy = 0;
+    if (!tilting) {
+      t.x *= 1 - ease(4, dt);
+      t.y *= 1 - ease(4, dt);
+    }
+    if (Math.abs(t.x) + Math.abs(t.y) > 1e-4) active = true;
+    this.soapGroup.rotation.set(t.x, t.y, 0);
+
+    // 색 전환
+    if (this.material && !this.material.color.equals(this.tintTarget)) {
+      const c = this.material.color;
+      c.lerp(this.tintTarget, ease(10, dt));
+      if (Math.abs(c.r - this.tintTarget.r) + Math.abs(c.g - this.tintTarget.g) + Math.abs(c.b - this.tintTarget.b) < 1e-3) {
+        c.copy(this.tintTarget);
+      }
+      active = true;
+    }
+
+    // 눌릴수록 그림자 진해짐
+    const press = this.dents.reduce((s, d) => s + d.depth, 0) / TUNING.depth;
+    (this.shadow.material as THREE.MeshBasicMaterial).opacity = 0.9 + Math.min(press, 1.5) * 0.1;
+
+    if (active) this.render();
+    this.dirty = false;
+  };
+
+  private applyMorph(name: string, w: number) {
+    const i = this.morphIndex[name];
+    if (i !== undefined && this.soap?.morphTargetInfluences) this.soap.morphTargetInfluences[i] = w < 1e-4 ? 0 : w;
+  }
+
+  private syncDents() {
+    const n = Math.min(this.dents.length, MAX_DENTS);
+    const list = this.dents.slice(-n);
+    for (let i = 0; i < n; i++) {
+      const d = list[i];
+      this.uniforms.uDentC.value[i].set(d.center.x, d.center.y, d.center.z, Math.max(0, d.depth));
+      this.uniforms.uDentN.value[i].set(d.normal.x, d.normal.y, d.normal.z, d.radius);
+    }
+    this.uniforms.uDentCount.value = n;
+  }
+
+  private render() {
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  /** 테스트/디버그용 상태 */
+  debugState() {
+    return {
+      dents: this.dents.map((d) => ({ depth: d.depth, held: d.held })),
+      morph: { ...this.morph },
+      loaded: !!this.soap,
+    };
+  }
+}

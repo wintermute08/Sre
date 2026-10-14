@@ -1,0 +1,447 @@
+:root {
+  --bg: #f2f4f6;
+  --bg-top: #f9fafb;
+  --surface: #ffffff;
+  --grey-900: #191f28;
+  --grey-700: #4e5968;
+  --grey-600: #6b7684;
+  --grey-500: #8b95a1;
+  --grey-200: #e5e8eb;
+  --grey-100: #f2f4f6;
+  --blue: #3182f6;
+  --blue-pressed: #1b64da;
+  --dim: rgba(0, 0, 0, 0.4);
+  --chip: rgba(255, 255, 255, 0.86);
+  --radius-l: 24px;
+  --radius-m: 16px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17171c;
+    --bg-top: #1e1e24;
+    --surface: #26262d;
+    --grey-900: #f2f2f4;
+    --grey-700: #c3c3c6;
+    --grey-600: #9e9ea4;
+    --grey-500: #7e7e87;
+    --grey-200: #3c3c47;
+    --grey-100: #2c2c35;
+    --dim: rgba(0, 0, 0, 0.6);
+    --chip: rgba(44, 44, 53, 0.86);
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--bg);
+  color: var(--grey-900);
+  font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Apple SD Gothic Neo',
+    'Noto Sans KR', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  word-break: keep-all;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.stage {
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 70%);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  outline: none;
+}
+
+.stage canvas:focus-visible {
+  box-shadow: inset 0 0 0 3px var(--blue);
+}
+
+/* ---------- 상단 ---------- */
+.header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: calc(env(safe-area-inset-top) + 20px) 20px 0 24px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.35;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.header p {
+  margin: 4px 0 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--grey-600);
+}
+
+.icon-button {
+  pointer-events: auto;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--chip);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--grey-700);
+  transition: transform 0.15s var(--ease), background 0.15s;
+}
+
+.icon-button:active {
+  transform: scale(0.94);
+}
+
+.icon-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* ---------- 첫 안내 ---------- */
+.coach {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 64px;
+  height: 64px;
+  margin: -40px 0 0 -32px;
+  border-radius: 50%;
+  pointer-events: none;
+  border: 2px solid rgba(49, 130, 246, 0.55);
+  animation: coach 1.6s var(--ease) infinite;
+  transition: opacity 0.4s;
+}
+
+@keyframes coach {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+/* ---------- 하단 ---------- */
+.footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0 20px calc(env(safe-area-inset-bottom) + 28px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.hint {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--grey-700);
+  transition: opacity 0.4s;
+}
+
+.counter {
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--chip);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--grey-600);
+  font-variant-numeric: tabular-nums;
+}
+
+.counter strong {
+  color: var(--blue);
+  font-weight: 700;
+}
+
+/* ---------- 로딩 / 오류 ---------- */
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.loading {
+  width: min(200px, 60vw);
+  text-align: center;
+  font-size: 15px;
+  color: var(--grey-600);
+}
+
+.bar {
+  margin-top: 12px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--grey-200);
+  overflow: hidden;
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  background: var(--blue);
+  border-radius: 2px;
+  transition: width 0.2s;
+}
+
+.error-card {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 360px;
+  padding: 24px;
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  text-align: center;
+}
+
+.error-card p {
+  margin: 0 0 20px;
+  font-size: 17px;
+  line-height: 1.5;
+  color: var(--grey-700);
+}
+
+/* ---------- 바텀시트 ---------- */
+.sheet-dim {
+  position: fixed;
+  inset: 0;
+  background: var(--dim);
+  animation: fade 0.2s var(--ease);
+}
+
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0 auto;
+  max-width: 480px;
+  padding: 12px 24px calc(env(safe-area-inset-bottom) + 16px);
+  border-radius: var(--radius-l) var(--radius-l) 0 0;
+  background: var(--surface);
+  animation: rise 0.32s var(--ease);
+}
+
+.sheet-handle {
+  width: 40px;
+  height: 4px;
+  margin: 0 auto 20px;
+  border-radius: 2px;
+  background: var(--grey-200);
+}
+
+.sheet h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  padding: 10px 0;
+}
+
+.row-text strong {
+  display: block;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.row-text span {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--grey-600);
+}
+
+.switch {
+  flex: none;
+  position: relative;
+  width: 52px;
+  height: 32px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--grey-200);
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition: transform 0.2s var(--ease);
+}
+
+.switch[aria-checked='true'] {
+  background: var(--blue);
+}
+
+.switch[aria-checked='true']::after {
+  transform: translateX(20px);
+}
+
+.switch:focus-visible,
+.tint:focus-visible,
+.cta:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.tints {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0 12px;
+}
+
+.tint {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--grey-600);
+}
+
+.tint i {
+  display: block;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+  transition: box-shadow 0.15s;
+}
+
+.tint[aria-checked='true'] {
+  color: var(--grey-900);
+  font-weight: 600;
+}
+
+.tint[aria-checked='true'] i {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06), 0 0 0 2px var(--surface), 0 0 0 4px var(--blue);
+}
+
+.cta {
+  width: 100%;
+  height: 56px;
+  margin-top: 12px;
+  border: 0;
+  border-radius: var(--radius-m);
+  background: var(--blue);
+  color: #fff;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease), background 0.15s;
+}
+
+.cta:active {
+  transform: scale(0.98);
+  background: var(--blue-pressed);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach {
+    animation: none;
+    opacity: 1;
+  }
+  .sheet,
+  .sheet-dim {
+    animation: none;
+  }
+}
