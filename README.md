@@ -30,6 +30,7 @@ npm run build      # 배포 전 확인
 | `lib/soap/audio.ts` | 크런치 사운드 합성 |
 | `public/models/slang_soap.glb` | 웹용 비누 모델 |
 | `scripts/optimize-model.mjs` | 원본 GLB → 웹용 GLB 변환 |
+| `scripts/make-stamp.py` | 윗면 'SLANG' 각인 텍스처 굽기 (`public/models/soap_stamp_*.png`) |
 
 ## 원본 전달서와 다르게 한 점
 
@@ -39,6 +40,16 @@ npm run build      # 배포 전 확인
   npm run optimize-model -- 원본/slang_soap.glb public/models/slang_soap.glb
   ```
 - **소리**: 샘플 대신 합성음을 씁니다. 짧은 노이즈 알갱이 수십 개를 앞쪽에 몰아 뿌려서 크런치를 만들기 때문에 매번 조금씩 다르게 들립니다. 음량은 실제 변형량(누른 깊이, 문지른 거리, 복원 속도)에 맞춥니다.
+
+## 각인 (SLANG)
+
+원본 GLB 각인은 글자 테두리 1~2px 선뿐이라 휴대폰 크기에서는 보이지 않았어요. 그래서 각인을 다시 구웠어요.
+글자 안쪽으로 완만하게 파이는 경사(노멀맵)와, 파인 홈을 살짝 어둡게 하는 그늘 마스크를 함께 써요.
+글자나 깊이를 바꾸려면 `scripts/make-stamp.py` 위쪽 값(`TEXT`, `TEXT_W_MM`, `DEPTH_MM`)을 고친 뒤 다시 실행하세요.
+
+```bash
+python3 scripts/make-stamp.py   # numpy, Pillow 필요
+```
 
 ## 손맛 조절
 

@@ -56,6 +56,13 @@ vec3 deformSoap(vec3 p) {
 }
 `;
 
+/** 각인 그늘: 파인 홈 안쪽을 살짝 어둡게 (실제 비누 각인이 보이는 이유) */
+export const stampUniforms = {
+  uStampCavity: { value: new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1) as THREE.Texture },
+  uCavityStrength: { value: 0.0 },
+};
+stampUniforms.uStampCavity.value.needsUpdate = true;
+
 /** GLB 재질을 받아 눌림 셰이더가 들어간 비누 재질로 바꾼다 */
 export function createSoapMaterial(source: THREE.MeshStandardMaterial, uniforms: DentUniforms) {
   const mat = new THREE.MeshPhysicalMaterial({
@@ -63,7 +70,7 @@ export function createSoapMaterial(source: THREE.MeshStandardMaterial, uniforms:
     roughness: 0.42,
     metalness: 0,
     normalMap: source.normalMap,
-    normalScale: source.normalScale.clone().multiplyScalar(1.6), // 각인을 조금 더 또렷하게
+    normalScale: source.normalScale.clone(), // 부호(y)는 GLTFLoader가 정한 그대로 유지
     // 뽀얀 분가루 느낌
     sheen: 0.25,
     sheenRoughness: 0.8,
@@ -74,7 +81,16 @@ export function createSoapMaterial(source: THREE.MeshStandardMaterial, uniforms:
   });
 
   mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
+    Object.assign(shader.uniforms, uniforms, stampUniforms);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform sampler2D uStampCavity;\nuniform float uCavityStrength;')
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+        #ifdef USE_NORMALMAP
+          diffuseColor.rgb *= 1.0 - uCavityStrength * texture2D(uStampCavity, vNormalMapUv).r;
+        #endif`,
+      );
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${DEFORM_GLSL}`)
       .replace(

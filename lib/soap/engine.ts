@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CrunchAudio } from './audio';
-import { MAX_DENTS, createDentUniforms, createSoapMaterial } from './deform';
+import { MAX_DENTS, createDentUniforms, createSoapMaterial, stampUniforms } from './deform';
 
 // ---------- 튜닝 값 (미터, 초) ----------
 export const TUNING = {
@@ -321,6 +321,7 @@ export class SoapEngine {
         const src: THREE.Mesh = found;
         const geometry = bakeMesh(src);
         const material = createSoapMaterial(src.material as THREE.MeshStandardMaterial, this.uniforms);
+        this.loadStamp(material);
         this.baseColor = material.color.clone();
         if (this.tintTarget.equals(new THREE.Color(SOAP_TINTS.ivory))) this.tintTarget.copy(this.baseColor);
         this.material = material;
@@ -358,6 +359,38 @@ export class SoapEngine {
       },
       () => this.events.onError?.('비누를 불러오지 못했어요. 네트워크를 확인하고 새로고침해 주세요.'),
     );
+  }
+
+  /**
+   * 각인 텍스처 교체. 원본 GLB 각인은 글자 테두리 1~2px 선뿐이라 휴대폰 크기에서 사라진다.
+   * scripts/make-stamp.py 로 구운 넓은 경사 노멀맵 + 홈 그늘 마스크로 바꾼다. (실패하면 원본 유지)
+   */
+  private loadStamp(material: THREE.MeshPhysicalMaterial) {
+    const loader = new THREE.TextureLoader();
+    const aniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    const prep = (t: THREE.Texture) => {
+      t.flipY = false; // glTF와 같은 UV 방향
+      t.colorSpace = THREE.NoColorSpace;
+      t.anisotropy = aniso; // 비스듬히 보는 윗면에서도 또렷하게
+      return t;
+    };
+    Promise.all([
+      loader.loadAsync('/models/soap_stamp_normal.png'),
+      loader.loadAsync('/models/soap_stamp_cavity.png'),
+    ])
+      .then(([normal, cavity]) => {
+        if (this.disposed) return;
+        material.normalMap?.dispose();
+        material.normalMap = prep(normal);
+        const sy = Math.sign(material.normalScale.y) || 1;
+        material.normalScale.set(1, sy);
+        stampUniforms.uStampCavity.value = prep(cavity);
+        stampUniforms.uCavityStrength.value = 0.2;
+        this.dirty = true;
+      })
+      .catch(() => {
+        /* 원본 각인으로 계속 */
+      });
   }
 
   private makeShadow() {
