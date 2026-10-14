@@ -7,12 +7,14 @@ import { MAX_DENTS, createDentUniforms, createSoapMaterial } from './deform';
 
 // ---------- 튜닝 값 (미터, 초) ----------
 export const TUNING = {
-  depth: 0.0085,        // 기본 눌림 깊이 (두께 28mm의 약 30%)
-  holdExtra: 0.3,       // 1.2초 이상 꾹 누르면 추가로 더 들어가는 비율
+  depth: 0.0065,        // 최종 눌림 깊이 (두께 28mm의 약 23%)
+  holdExtra: 0.1,       // 1.2초 이상 꾹 누르면 추가로 더 들어가는 비율 (조금만)
+  firmStage: 0.45,      // 바삭하기 전 단단하게 버티는 깊이 비율
+  crunchAt: 0.1,        // 이 시간(초) 뒤 '바삭' 하며 꺼짐 — 크런치 소리 피크와 맞춤
   holdTime: 1.2,
-  radius: 0.013,        // 손가락 자국 반경
-  stiffness: 520,       // 누를 때 스프링 — 약 0.15초에 '푹'
-  damping: 0.8,         // 1보다 작으면 바닥에서 살짝 출렁
+  radius: 0.0105,       // 손가락 자국 반경 — 좁을수록 단단한 재질처럼 보임
+  stiffness: 1600,      // 누를 때 스프링 — 단단하게 바로 반응
+  damping: 1.0,         // 출렁임 없음 (1보다 작으면 젤리처럼 출렁)
   releaseDelay: 0.05,   // 손 떼고 잠깐 버티는 시간
   recoverSlow: 1.1,     // 복원 초반 속도 — 쫀득하게 버팀
   recoverFast: 7.0,     // 복원 후반 속도
@@ -67,11 +69,18 @@ class Dent {
       this.center.lerp(this.target, ease(30, dt));
       this.normal.lerp(this.targetNormal, ease(20, dt)).normalize();
       const hold = Math.min(this.age / TUNING.holdTime, 1);
-      const goal = TUNING.depth * (1 + TUNING.holdExtra * hold * hold);
+      // 1단계: 단단하게 버팀 → 2단계: '바삭' 하며 꺼짐 → 그 뒤로는 거의 안 들어감
+      const stage = this.age < TUNING.crunchAt ? TUNING.firmStage : 1;
+      const goal = TUNING.depth * stage * (1 + TUNING.holdExtra * hold * hold);
       const k = TUNING.stiffness;
       const c = 2 * Math.sqrt(k) * TUNING.damping;
-      this.vel += (k * (goal - this.depth) - c * this.vel) * dt;
-      this.depth += this.vel * dt;
+      // 단단한 스프링은 큰 dt에서 발산하므로 1/240초 단위로 쪼개서 적분 (저사양 폰 30fps 대비)
+      const steps = Math.ceil(dt / (1 / 240));
+      const h = dt / steps;
+      for (let i = 0; i < steps; i++) {
+        this.vel += (k * (goal - this.depth) - c * this.vel) * h;
+        this.depth += this.vel * h;
+      }
     } else {
       const t = this.age - this.releasedAt - TUNING.releaseDelay;
       if (t > 0) {
@@ -421,7 +430,8 @@ export class SoapEngine {
     this.dents.push(dent);
     while (this.dents.length > MAX_DENTS) this.dents.shift();
     this.pointers.set(id, { mode: 'press', dent, last: local.clone() });
-    this.audio.press(intensity, pan);
+    // 꺼지는 순간보다 살짝 앞서 소리를 낸다 (휴대폰 오디오 지연 보정)
+    this.audio.press(intensity, pan, Math.max(0, TUNING.crunchAt - 0.02));
     if (this.haptics) navigator.vibrate?.([12, 16, 8, 20, 5]);
     this.events.onPress?.();
     this.dirty = true;

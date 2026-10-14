@@ -106,7 +106,7 @@ export class CrunchAudio {
       const p = this.pending;
       this.pending = null;
       // 꾹 누르고 있다가 떼는 경우도 있으니 넉넉히 기다린다
-      if (performance.now() - p.at < 4000) this.press(p.intensity * 0.8, p.pan);
+      if (performance.now() - p.at < 4000) this.press(p.intensity * 0.8, p.pan, 0);
     });
     return true;
   }
@@ -174,15 +174,26 @@ export class CrunchAudio {
   }
 
   /** 누르는 순간의 메인 크런치. intensity 0~1 */
-  press(intensity: number, pan = 0) {
+  /**
+   * giveAt: 손가락이 단단한 표면을 버티다 '바삭' 하고 꺼지는 시점(초).
+   * 그 전까지는 희미하게 버티는 소리, 그 순간에 메인 크런치.
+   */
+  press(intensity: number, pan = 0, giveAt = 0) {
     if (!this.enabled) return;
     if (!this.ready) {
       this.pending = { intensity, pan, at: performance.now() };
       return;
     }
-    const t0 = this.ctx!.currentTime + 0.004;
+    const now = this.ctx!.currentTime + 0.004;
     const k = Math.max(0.25, clamp01(intensity));
 
+    // 버티는 동안: 아주 작게 '찌직'
+    const pre = giveAt > 0 ? Math.round(rand(4, 8)) : 0;
+    for (let i = 0; i < pre; i++) {
+      this.grain(now + giveAt * Math.random(), logRand(1200, 4000), rand(1.5, 4), logRand(0.0012, 0.004), rand(0.03, 0.09) * k, pan + rand(-0.2, 0.2));
+    }
+
+    const t0 = now + giveAt;
     this.thump(t0, 0.55 * k);
 
     const span = rand(0.14, 0.2) + 0.08 * k; // 눌림 시간(0.12~0.2s)과 맞춤

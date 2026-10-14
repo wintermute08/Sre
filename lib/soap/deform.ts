@@ -49,8 +49,8 @@ vec3 deformSoap(vec3 p) {
     // 밀려난 말랑이가 옆으로 퍼지고 둘레가 살짝 솟음
     float l = sqrt(l2) + 1e-6;
     float ring = (l / r) * exp(-l2 / (rr * 1.6));
-    o += (lat / l) * (d * 0.3 * ring * g);
-    o += n * (d * 0.14 * ring * ring * g);
+    o += (lat / l) * (d * 0.18 * ring * g);
+    o += n * (d * 0.1 * ring * ring * g);
   }
   return o;
 }
