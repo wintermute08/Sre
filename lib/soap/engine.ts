@@ -205,7 +205,9 @@ export class SoapEngine {
   private time = 0;
 
   constructor(private canvas: HTMLCanvasElement, private events: EngineEvents = {}) {
+    this.mark('start');
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+    this.mark('renderer');
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.toneMapping = THREE.NeutralToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -218,6 +220,7 @@ export class SoapEngine {
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     this.scene.environmentIntensity = 0.35;
     pmrem.dispose();
+    this.mark('environment');
 
     // 낮은 각도의 옆빛이어야 윗면 곡률·눌린 자국·각인이 드러난다
     const key = new THREE.DirectionalLight('#fff1dc', 3.0);
@@ -336,6 +339,7 @@ export class SoapEngine {
       '/models/slang_soap.glb',
       (gltf) => {
         if (this.disposed) return;
+        this.mark('model-loaded');
         let found: THREE.Mesh | null = null;
         gltf.scene.traverse((o) => {
           if (!found && (o as THREE.Mesh).isMesh) found = o as THREE.Mesh;
@@ -376,7 +380,11 @@ export class SoapEngine {
         (src.material as THREE.Material).dispose();
 
         // 첫 프레임에서 셰이더 컴파일 끊김 방지
+        this.mark('model-ready');
         this.renderer.compile(this.scene, this.camera);
+        this.mark('shaders-compiled');
+        this.render();
+        this.mark('first-frame');
         this.dirty = true;
         this.events.onReady?.();
         // 화면이 뜬 뒤에 녹음 효과음을 받는다 (첫 화면 로딩을 늦추지 않게)
@@ -714,6 +722,15 @@ export class SoapEngine {
 
   private render() {
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /** 로딩 단계별 시각 (ms, 엔진 시작 기준) — ?debug 에서 __soap.timings 로 확인 */
+  timings: Record<string, number> = {};
+  private t0 = 0;
+  private mark(name: string) {
+    const now = performance.now();
+    if (name === 'start') this.t0 = now;
+    this.timings[name] = Math.round(now - this.t0);
   }
 
   /** 테스트/디버그용 상태 */
